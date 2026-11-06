@@ -1,0 +1,18 @@
+# Generated data -- recreate any time with: python3 generate_realistic_data.py
+/sources/
+/daily/
+/answer_key/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Local secrets (if credentials ever move out of db_config.py)
+.env
+
+# macOS and editors
+.DS_Store
+.vscode/
+.idea/

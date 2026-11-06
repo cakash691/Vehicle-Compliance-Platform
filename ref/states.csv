@@ -1,0 +1,37 @@
+state_key,state_name,vehicles_2015_thousands,vehicle_share,theft_rate_multiplier,name_region,camera_city_share
+AN,Andaman and Nicobar Islands,102,0.000486,1.0,bengal,0.0
+AP,Andhra Pradesh,7882,0.037529,1.0,telugu,0.15
+AR,Arunachal Pradesh,151,0.000719,1.0,northeast,0.0
+AS,Assam,2510,0.011951,1.0,assam,0.15
+BR,Bihar,4778,0.022750,1.0,hindi,0.12
+CH,Chandigarh,676,0.003219,1.0,punjab,0.95
+CG,Chhattisgarh,4314,0.020541,1.0,hindi,0.15
+DD,Dadra and Nagar Haveli and Daman and Diu,212,0.001009,1.0,gujarati,0.0
+DL,Delhi,8851,0.042143,5.2,hindi,0.95
+GA,Goa,1084,0.005161,1.0,konkan,0.3
+GJ,Gujarat,18721,0.089137,1.0,gujarati,0.3
+HR,Haryana,7928,0.037748,1.0,hindi,0.3
+HP,Himachal Pradesh,1077,0.005128,1.0,hindi,0.0
+JK,Jammu and Kashmir,1214,0.005780,1.0,kashmir,0.2
+JH,Jharkhand,2066,0.009837,1.0,hindi,0.12
+KA,Karnataka,14785,0.070397,1.0,kannada,0.45
+KL,Kerala,9648,0.045938,0.16,malayali,0.25
+LA,Ladakh,30,0.000143,1.0,ladakh,0.0
+LD,Lakshadweep,14,0.000067,0.0,malayali,0.0
+MP,Madhya Pradesh,11141,0.053046,1.0,hindi,0.2
+MH,Maharashtra,25562,0.121710,1.0,marathi,0.35
+MN,Manipur,307,0.001462,1.0,northeast,0.0
+ML,Meghalaya,267,0.001271,1.0,northeast,0.0
+MZ,Mizoram,151,0.000719,1.0,northeast,0.0
+NL,Nagaland,334,0.001590,1.0,northeast,0.0
+OD,Odisha,5219,0.024850,1.0,odia,0.12
+PY,Puducherry,803,0.003823,1.0,tamil,0.5
+PB,Punjab,6263,0.029820,1.0,punjab,0.15
+RJ,Rajasthan,12379,0.058941,1.0,hindi,0.15
+SK,Sikkim,43,0.000205,1.0,sikkim,0.0
+TN,Tamil Nadu,22519,0.107221,0.31,tamil,0.35
+TS,Telangana,7845,0.037353,1.0,telugu,0.45
+TR,Tripura,282,0.001343,1.0,bengal,0.0
+UP,Uttar Pradesh,21636,0.103017,1.0,hindi,0.18
+UK,Uttarakhand,1827,0.008699,1.0,hindi,0.2
+WB,West Bengal,7403,0.035248,1.0,bengal,0.25
