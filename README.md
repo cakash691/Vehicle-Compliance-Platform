@@ -1,50 +1,52 @@
 # Vehicle Compliance Platform
 
-Is a vehicle seen on an Indian road insured, stolen, or clear? This project answers that question by integrating four independently designed data sources into a MySQL warehouse:
+A data warehouse and ETL pipeline that turns raw records from four independently designed Indian vehicle data sources into analytics-ready tables:
 
 - the RTO registry
 - insurer policy feeds
 - ANPR camera reads
 - police theft FIRs and RVSF scrapping records
 
-It is being extended into an analytics platform for compliance trends.
+The warehouse is built to answer questions such as:
 
-It started as the Part A term project for CSE656 Information Integration and Applications at IIIT-Delhi ([original repository](https://github.com/cakash691/Identification-of-Uninsured-Vehicles)).
+- Which states see the most uninsured vehicles on the road, month by month?
+- How many two-wheelers lapse after their first policy?
+- Where do stolen vehicles turn up?
 
-On 4 August 2026, the Supreme Court directed that ANPR cameras be integrated with the IIB and VAHAN databases so that uninsured vehicles receive automatic e-challans ([report](https://www.thelawadvice.com/news/sc-orders-automatic-e-challans-for-uninsured-vehicles-directs-4-year-insurance-for-new-cars-6-years-for-two-wheelers)). This project prototypes that integration.
+On 4 August 2026, the Supreme Court directed that ANPR cameras be integrated with the IIB and VAHAN databases so that uninsured vehicles receive automatic e-challans ([report](https://www.thelawadvice.com/news/sc-orders-automatic-e-challans-for-uninsured-vehicles-directs-4-year-insurance-for-new-cars-6-years-for-two-wheelers)). That is the same integration this warehouse performs, aimed at analysis rather than enforcement. An earlier prototype lives in [Identification-of-Uninsured-Vehicles](https://github.com/cakash691/Identification-of-Uninsured-Vehicles).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    G["generate_realistic_data.py<br/>CSV files + nightly drops"]
+    G["generate_realistic_data.py<br/>daily CSV drops"]
     subgraph SRC["Source databases in MySQL"]
         R["RTO registry"]
         P["Insurer policies"]
         C["ANPR camera reads"]
         T["Theft and scrapping"]
     end
-    E["run_etl.py<br/>standardize, match, decide"]
-    V[("vehicle_360<br/>current status")]
-    A["Streamlit app<br/>lookup + flagged report"]
-    H[("History star schema<br/>planned")]
-    D["Trend dashboard<br/>planned"]
-    N["Natural-language queries<br/>in progress"]
+    B["Bronze<br/>raw copies per batch"]
+    S["Silver<br/>cleaned and conformed"]
+    GD[("Gold<br/>star schema with history")]
+    DB["Dashboard"]
+    M["SQL marts"]
+    V["vehicle_360 view<br/>+ lookup app"]
     G --> R & P & C & T
-    R & P & C & T --> E
-    E --> V --> A
-    E -.-> H
-    H -.-> D
-    H -.-> N
+    R & P & C & T --> B
+    B --> S --> GD
+    GD --> DB & M & V
+    classDef planned stroke-dasharray: 5 5
+    class B,S,GD,DB,M planned
 ```
 
-The four sources have no foreign keys between them. The ETL is the only place they meet, and it does three things:
+The four sources have no foreign keys between them; the warehouse is the only place they meet. It is organised in three layers:
 
-- standardizes plate numbers
-- matches records across the sources
-- applies severity-ordered rules: theft or scrapping, then no valid insurance, then clear
+- **Bronze** keeps raw copies of every new or changed source row, tagged with a batch id.
+- **Silver** cleans and conforms them: it parses plate numbers, gives each vehicle a single identity, works out insurance coverage periods and current theft status, and flags bad camera reads.
+- **Gold** is a star schema of facts and dimensions that keeps history, so trends can be analysed.
 
-`vehicle_360` holds the current status of every vehicle seen on camera. History tables for analysis are next.
+Dashed boxes are planned. Today, a prototype ETL (`run_etl.py`) builds `vehicle_360` straight from the sources. It will be rebuilt on top of the gold layer.
 
 ## Status
 
@@ -52,13 +54,14 @@ The four sources have no foreign keys between them. The ETL is the only place th
 |---|---|
 | Four source databases, loaded with calibrated data | Done |
 | Bulk load and three nightly drops (`mysql/`) | Done |
-| ETL (`run_etl.py`): incremental extract, standardize, decide, upsert | Working; accuracy fixes planned |
-| `vehicle_360` and the Streamlit lookup app | Done |
 | Accuracy scoring against ground truth (`evaluate_etl.py`) | Done |
-| History star schema for analytics | Planned |
-| Nightly scheduler | Planned |
-| Trend dashboard | Planned |
-| Natural-language queries (CSE656 Part C) | In progress |
+| Prototype ETL (`run_etl.py`) → `vehicle_360` + Streamlit lookup app | Done; to be rebuilt on the warehouse layers |
+| Bronze layer: raw copies per batch | Next |
+| Silver layer: cleaned and conformed | Planned |
+| Gold layer: star schema with history | Planned |
+| Data quality tests and run log | Planned |
+| Nightly orchestration | Planned |
+| SQL marts and analytics dashboard | Planned |
 
 ## Quick start (macOS)
 
@@ -128,9 +131,9 @@ The generator is seeded, so `python3 generate_realistic_data.py` recreates byte-
 
 ## Measuring accuracy
 
-Because the data is simulated, the true status of every vehicle is known (`answer_key/`). `evaluate_etl.py` scores `vehicle_360` against it. This is the baseline for the Part A ETL, measured by running the quick start above:
+Because the data is simulated, the true status of every vehicle is known (`answer_key/`). `evaluate_etl.py` scores `vehicle_360` against it. This is the baseline for the prototype ETL, measured by running the quick start above:
 
-| Metric | Part A ETL |
+| Metric | Prototype ETL |
 |---|---|
 | Status accuracy on real plates | 86.7% |
 | Insured vehicles wrongly flagged | 19.6% (6,447 of 32,859) |
@@ -140,17 +143,24 @@ Because the data is simulated, the true status of every vehicle is known (`answe
 
 ## Roadmap
 
-1. **Fix ETL accuracy:**
-   - match `NEW` policies on `chassis_no` (4,328 of the wrongful flags)
-   - use the third-party policy valid on the date instead of the last row (1,485)
-   - parse plates into their parts (562)
-   - re-evaluate a vehicle's status when a policy arrives later (41)
-   - ignore recovered thefts
-   - watermark on `ingested_at`
-   - handle camera misreads (CSE656 Part B)
-2. **Add a history star schema:** `fact_sighting` with vehicle, date, location and insurer dimensions, so trends can be analysed.
-3. **Schedule the nightly batch.**
-4. **Build on the history tables:** a trend dashboard and natural-language queries (CSE656 Part C).
+1. **Design.** Define the grain of each fact, the star schema, naming conventions and a data catalog, in `docs/`.
+2. **Bronze.** Extract incrementally from the four sources using their change-tracking columns (`ingested_at`, `issued_at`, `last_updated`, `updated_at`), and log each batch.
+3. **Silver.** This is where the prototype's 6,447 wrongful flags get fixed:
+   - identify each vehicle by chassis number
+   - parse plates into their parts
+   - compute third-party coverage periods (own-damage-only policies don't count)
+   - keep the current theft status
+   - map insurer names (Reliance General → IndusInd)
+   - deduplicate camera reads and flag misreads
+4. **Gold.** Build the star schema:
+   - `fact_sighting`, recording the status at the moment of each camera read
+   - `fact_policy`
+   - `fact_theft_case`
+   - a monthly compliance snapshot
+   - date, vehicle (with history), location and insurer dimensions, with stable surrogate keys
+5. **Quality tests** that stop a bad batch, plus a run log.
+6. **Nightly orchestration:** one command, scheduled with cron.
+7. **Analytics:** SQL marts and a dashboard, with `vehicle_360` rebuilt as a gold view for the lookup app.
 
 ## Repository layout
 
