@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS etl.batch (
   PRIMARY KEY (batch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- one row per step of a run (later also one per quality check)
+-- one row per step of a run, and one per quality check
 CREATE TABLE IF NOT EXISTS etl.step_log (
   step_id        INT          NOT NULL AUTO_INCREMENT,
   batch_id       INT          NOT NULL,
-  step           VARCHAR(100) NOT NULL,        -- e.g. bronze.capture_log
-  rows_affected  INT          NULL,
-  status         VARCHAR(12)  NOT NULL,        -- RUNNING | OK | FAILED | ROLLED_BACK (undone by a later failure)
+  step           VARCHAR(100) NOT NULL,        -- e.g. bronze.capture_log, or check: registry: ...
+  rows_affected  INT          NULL,            -- for a check: the rows breaking its rule
+  status         VARCHAR(12)  NOT NULL,        -- RUNNING | OK | FAILED | WARN | ROLLED_BACK (undone by a later failure)
+  message        VARCHAR(255) NULL,            -- for a check: what it measured, or which values are missing
   started_at     DATETIME     NOT NULL,
   finished_at    DATETIME     NULL,
   PRIMARY KEY (step_id),

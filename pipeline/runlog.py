@@ -61,9 +61,9 @@ def start_step(batch_id, step):
     return step_id
 
 
-def end_step(step_id, status, rows_affected=None):
-    _execute("UPDATE etl.step_log SET status = %s, rows_affected = %s, finished_at = NOW() WHERE step_id = %s",
-             (status, rows_affected, step_id))
+def end_step(step_id, status, rows_affected=None, message=None):
+    _execute("UPDATE etl.step_log SET status = %s, rows_affected = %s, message = %s, finished_at = NOW() "
+             "WHERE step_id = %s", (status, rows_affected, message, step_id))
 
 
 def mark_rolled_back(step_ids):

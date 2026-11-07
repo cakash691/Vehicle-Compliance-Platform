@@ -7,7 +7,7 @@
 -- What each column means: docs/DATA_MODEL.md, section 13. Facts point at dimensions
 -- through integer keys; when nothing matches they point at the dimension's -1 row
 -- ("Unknown" or "Not yet"), never at NULL. Keys are not enforced as foreign keys;
--- the quality tests check them instead.
+-- the quality checks (pipeline/checks.py) look for broken keys instead.
 -- =====================================================================================
 
 -- ---------- dimensions ----------

@@ -1,6 +1,6 @@
 # Data model
 
-Status, 7 Nov 2026: bronze, silver, gold and the run log are built. Quality tests, nightly scheduling and the marts come next. Until the choices in section 12 are settled, the defaults described there apply.
+Status, 7 Nov 2026: bronze, silver, gold, the quality checks and the run log are built. Nightly scheduling and the marts come next. Until the choices in section 12 are settled, the defaults described there apply.
 
 This document fixes the design before any warehouse SQL is written: the questions the warehouse must answer, what one row means in each table, how keys and history work, the cleaning rules, the naming conventions, and a column-level catalog of the gold layer.
 
@@ -93,7 +93,7 @@ Which dimensions each fact uses, and in what role:
   - History starts with the warehouse. The registry keeps only the current row, so changes made before the first load cannot be recovered. From then on, bronze keeps every changed row and `dim_vehicle` keeps every version. The three daily drops contain 10 such changes, all ownership transfers.
 - **Point in time.** Each fact points at the vehicle version that was valid on the fact's own date: the capture date, the issue date, the report date, or the snapshot's `status_as_of`.
 - **Indexes.** Each fact is indexed on its dimension keys; `dim_vehicle` on `(chassis_no, valid_from)` and `(plate, valid_from)`.
-- **No enforced foreign keys** in gold. Loads stay simple and fast, and the quality tests (section 11) check that every key resolves.
+- **No enforced foreign keys** in gold. Loads stay simple and fast, and the quality checks (section 11) make sure every key resolves.
 
 ## 6. Cleaning rules (silver)
 
@@ -145,7 +145,7 @@ Each silver row carries `dwh_batch_id`, the bronze batch it came from, so gold c
 | Table | One row per | Columns |
 |---|---|---|
 | `batch` | nightly run | `batch_id`, `as_of`, `started_at`, `finished_at`, `status` (`RUNNING`, `SUCCESS` or `FAILED`), `message` |
-| `step_log` | step or quality check in a run | `step_id`, `batch_id`, `step`, `rows_affected`, `status` (`RUNNING`, `OK`, `FAILED`, or `ROLLED_BACK` when a later failure undid it), `started_at`, `finished_at` |
+| `step_log` | step or quality check in a run | `step_id`, `batch_id`, `step`, `rows_affected`, `status` (`RUNNING`, `OK`, `FAILED`, `WARN`, or `ROLLED_BACK` when a later failure undid it), `message` (a check's note), `started_at`, `finished_at` |
 | `watermark` | source table | `source_table`, `watermark_column`, `watermark_value`, `batch_id` |
 
 ## 8. Nightly order
@@ -153,7 +153,7 @@ Each silver row carries `dwh_batch_id`, the bronze batch it came from, so gold c
 1. Open a batch in `etl.batch` with its `as_of` date.
 2. Bronze: copy the four sources past their watermarks, up to the end of `as_of`. The copies and the new watermarks are committed together, so a failed copy changes nothing.
 3. Silver, rebuilt in full from bronze: the `ref_*` tables and the plate lookup, then registrations, policies, theft cases and camera reads. Registrations go first, so a vehicle registered today matches today's reads.
-4. Quality checks on silver. A failure stops the batch here, before gold changes.
+4. Quality checks on silver (section 11). An ERROR stops the batch here, before gold changes.
 5. Gold: the dimensions (`dim_date` once, then `dim_state`, `dim_location`, `dim_insurer` and `dim_vehicle`), then `fact_policy`, `fact_sighting`, `fact_theft_case` and `fact_compliance_monthly`. Policies and camera reads that matched no vehicle on an earlier night are tried again. Each step commits as one transaction.
 6. Quality checks on gold, then close the batch as `SUCCESS` or `FAILED`. Silver is rebuilt on every run, and gold adds only what it does not have yet (matched on source ids), so a failed night is simply run again. A MySQL named lock allows one run at a time, and a batch left `RUNNING` by a run that died is marked `FAILED` by the next one.
 
@@ -174,18 +174,34 @@ Each silver row carries `dwh_batch_id`, the bronze batch it came from, so gold c
 - Flags start with `is_` or `has_` and hold 0 or 1. Counts and durations name their unit: `cover_days`, `vehicle_age_years`, `sightings_in_month`.
 - Technical columns start with `dwh_`: `dwh_batch_id`, `dwh_loaded_at`.
 - Code values are uppercase: `INSURED`, `TOLL_ANPR`, `MATCHED`.
-- Files: DDL in `mysql/etl/`, `mysql/bronze/`, `mysql/silver/` and `mysql/gold/`; Python in `pipeline/load_bronze.py`, `pipeline/load_silver.py` and `pipeline/load_gold.py`, run in that order by `run_pipeline.py`, with the run log in `pipeline/runlog.py` and the plate parser in `pipeline/plates.py`. Mappings live in `ref/` as CSV files, not in code.
+- Files: DDL in `mysql/etl/`, `mysql/bronze/`, `mysql/silver/` and `mysql/gold/`; Python in `pipeline/load_bronze.py`, `pipeline/load_silver.py` and `pipeline/load_gold.py`, run in that order by `run_pipeline.py`, with the checks in `pipeline/checks.py`, the run log in `pipeline/runlog.py` and the plate parser in `pipeline/plates.py`. Mappings live in `ref/` as CSV files, not in code.
 
-## 11. Invariants
+## 11. Quality checks
 
-These become the quality tests in roadmap step 5.
+`pipeline/checks.py` runs these every night. Each is one SQL query that counts the rows breaking a rule, and each result goes to `etl.step_log` as a step named `check: ...`, with the count and a short note. After silver, an ERROR check is a gate: if it fails, the night stops before gold changes. After gold, an ERROR check is an alarm: it marks the batch `FAILED` so someone looks. A WARN is logged and the night carries on. Primary keys are not checked, because MySQL enforces them.
 
-- Primary keys are unique in every silver and gold table.
-- Every fact key finds its dimension row (`-1` included).
-- Each chassis has exactly one current row in `dim_vehicle`, and its versions never overlap.
-- Status columns hold only the values in rule 8, and `read_status` only the four in rule 5.
-- Row counts reconcile: bronze and silver hold the same camera reads, and the silver reads not flagged as duplicates equal the `fact_sighting` rows.
-- At least 90% of a night's reads match a vehicle (normal nights: 95.5% to 98.1%). A sudden drop usually means a source changed its plate format.
+| After | Level | Check |
+|---|---|---|
+| silver | ERROR | registry: one current version per vehicle |
+| silver | ERROR | registry: no two vehicles share a plate |
+| silver | ERROR | registry: every plate parses |
+| silver | ERROR | registry: every vehicle class is in `ref/vehicle_classes.csv` |
+| silver | ERROR | policies: cover ends on or after it starts |
+| silver | WARN | policies: every insurer is in `ref/insurers.csv` |
+| silver | WARN | theft cases: every case is tied to a vehicle |
+| silver | ERROR | camera reads: none arrives before it was taken |
+| silver | ERROR | camera reads: bronze and silver hold the same reads |
+| silver | ERROR | camera reads: at least 90% of the reads gold is about to add match a vehicle. Normal nights match 95.5% to 98.1%; a sudden drop usually means a camera system changed its plate format |
+| silver | WARN | camera reads: every camera is in `ref/` |
+| gold | ERROR | `dim_vehicle`: one current version per vehicle |
+| gold | ERROR | `dim_vehicle`: each version starts the day after the previous one ends |
+| gold | ERROR | every fact key finds its dimension row (one check per fact; the monthly snapshot is checked for the months rebuilt that night) |
+| gold | ERROR | one `fact_sighting` row per silver read that is not a duplicate, one `fact_policy` row per policy, one `fact_theft_case` row per case |
+| gold | ERROR | `fact_compliance_monthly`: a row for every registered vehicle in the `as_of` month |
+| gold | WARN | `fact_policy`: policies still waiting for their vehicle to be registered |
+| gold | WARN | `fact_compliance_monthly`: uninsured share within 5 points of last month. A bigger jump usually means a feed went missing, not that behaviour changed |
+
+If a silver check fails, fix the cause, usually a parsing rule or a mapping in `ref/`, and run the same night again. Bronze still holds the night's rows, so nothing needs reloading, and because silver is rebuilt in full the fix reaches all of history.
 
 ## 12. Decisions to review
 

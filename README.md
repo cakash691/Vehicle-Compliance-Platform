@@ -60,8 +60,8 @@ All three layers are built; dashed boxes are planned. The design is in [docs/DAT
 | Bronze layer: raw copies per batch, with a run log and watermarks (`run_pipeline.py`) | Done |
 | Silver layer: cleaned and conformed, rebuilt from bronze on every run | Done |
 | Gold layer: star schema with history, and the `vehicle_360` view | Done |
-| Data quality tests | Next |
-| Nightly orchestration | Planned |
+| Data quality checks after silver and after gold (`pipeline/checks.py`) | Done |
+| Nightly orchestration | Next |
 | SQL marts and analytics dashboard | Planned |
 
 ## Quick start (macOS)
@@ -105,6 +105,13 @@ python3 evaluate_etl.py --database gold                # the warehouse
 ```
 
 Each pipeline run copies the night's changes into bronze, rebuilds silver from bronze, and adds what is new to gold. The first run takes about 3 minutes because it fills 46 months of compliance history; later nights take under a minute. Every step is logged in `etl.batch` and `etl.step_log`. If a run fails, fix the cause and rerun the same command. Only one run can happen at a time.
+
+23 quality checks run after silver and after gold. If one fails after silver, the night stops before gold changes; the usual fix is a parsing rule or a mapping in `ref/`, then the same command again. To see a night's checks:
+
+```bash
+$M -e "SELECT step, status, rows_affected, message FROM etl.step_log
+        WHERE batch_id = (SELECT MAX(batch_id) FROM etl.batch) AND step LIKE 'check:%'"
+```
 
 `01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties the three layers and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
 
@@ -171,7 +178,7 @@ The warehouse scores 100% because its rules follow the same definitions the simu
    - `fact_theft_case`
    - a monthly compliance snapshot
    - date, state, vehicle (with history), location and insurer dimensions, with stable surrogate keys
-5. **Quality tests** that stop a bad batch before it reaches gold, recorded in the run log.
+5. **Quality checks** (done) that stop a bad batch before it reaches gold, recorded in the run log: [docs/DATA_MODEL.md, section 11](docs/DATA_MODEL.md#11-quality-checks).
 6. **Nightly orchestration:** one command, scheduled with cron.
 7. **Analytics:** SQL marts and a dashboard, with `vehicle_360` rebuilt as a gold view for the lookup app.
 
@@ -186,7 +193,7 @@ The warehouse scores 100% because its rules follow the same definitions the simu
 │   ├── silver/                  silver tables
 │   └── gold/                    gold tables and the vehicle_360 view
 ├── run_pipeline.py              one night of the warehouse pipeline (--as-of YYYY-MM-DD)
-├── pipeline/                    one module per layer, the plate parser, the run log
+├── pipeline/                    one module per layer, the quality checks, the plate parser, the run log
 ├── docs/DATA_MODEL.md           warehouse design: grain, star schema, rules, naming, catalog
 ├── run_etl.py                   prototype: extract → standardize → decide → upsert into vehicle_360
 ├── app.py                       Streamlit lookup and flagged-vehicle report
