@@ -1,6 +1,6 @@
 # Data model
 
-Status, 7 Nov 2026: bronze and the run log are built; silver and gold are designed but not built yet. Until the choices in section 12 are settled, the defaults described there apply.
+Status, 7 Nov 2026: bronze, silver and the run log are built; gold is designed but not built yet. Until the choices in section 12 are settled, the defaults described there apply.
 
 This document fixes the design before any warehouse SQL is written: the questions the warehouse must answer, what one row means in each table, how keys and history work, the cleaning rules, the naming conventions, and a column-level catalog of the gold layer.
 
@@ -23,7 +23,7 @@ The lookup app moves onto the warehouse through one more view, `vehicle_360` (se
 |---|---|---|---|
 | Sources | `rto_registration`, `insurance`, `roadcapture`, `theft_records` | The four operational databases (already built) | A daily drop is loaded |
 | Bronze | `bronze` | Exact copies of source rows, plus `dwh_batch_id` and `dwh_loaded_at`. Append-only, so every version of a changed row is kept | Appends the rows past each source's watermark |
-| Silver | `silver` | One clean row per real-world record: one plate format, vehicles identified by chassis number, bad and duplicate camera reads flagged. Also the `ref/` files as `ref_*` tables | Upserts from the new bronze rows |
+| Silver | `silver` | One clean row per real-world record: one plate format, vehicles identified by chassis number, bad and duplicate camera reads flagged. Also the `ref/` files as `ref_*` tables | Rebuilt in full from bronze (about 25 seconds at this size), so a fixed rule reaches all of history |
 | Gold | `gold` | Star schema (5 dimensions, 4 facts) and the views built on it | See section 4 |
 | Control | `etl` | Run log and watermarks | One row per run and per step |
 
@@ -107,7 +107,7 @@ The prototype matched policies by plate and kept only the last policy per plate,
    Anything else is `INVALID_FORMAT`. On this data the rule turns every registry plate into the answer key's plate, and 99.6% of insurer plates into the registry plate of the same chassis. The rest are typos.
 2. **Vehicles are identified by chassis number, not plate.** Every policy carries the chassis, including the 13,584 filed under `NEW`. About 10% of theft cases have no chassis, so those fall back to the plate. Camera reads have only a plate, so they are matched through the registry.
 3. **Third-party cover.** Every policy type includes third-party (TP) cover except `Standalone OD`. The TP cover runs from `valid_from` to `valid_to`. For bundled policies, `valid_to` is the end of the TP term and `od_valid_to` the end of the one-year own-damage cover.
-4. **Insurer names** map through a new `ref/insurers.csv`. `Bharti AXA General Insurance` maps to `ICICI Lombard` (merged 8 Sep 2021), `Reliance General` to `IndusInd General Insurance` (renamed 22 Sep 2025), and New India, United India, Oriental and National are public sector.
+4. **Insurer names** map through `ref/insurers.csv`. `Bharti AXA General Insurance` maps to `ICICI Lombard` (merged 8 Sep 2021), `Reliance General` to `IndusInd General Insurance` (renamed 22 Sep 2025), and New India, United India, Oriental and National are public sector.
 5. **Camera reads.** A second read of the same plate by the same camera within 5 seconds is an adjacent-lane duplicate: silver flags it and gold leaves it out. Each read gets a `read_status`: `UNREADABLE` (empty plate), `INVALID_FORMAT`, `NOT_IN_REGISTRY` (valid format but unknown: a misread or a fake plate) or `MATCHED`. Today 96.9% of reads match.
 6. **Scrapping.** A vehicle counts as scrapped from the date of its certificate from a registered vehicle scrapping facility (RVSF), which the feed records as a `SHREDDED` case. The registry's `SCRAPPED` status is used only when there is no certificate, because the registry is updated late or not at all.
 7. **Theft.** A vehicle counts as stolen from the report date up to, but not including, the recovery date. Recovered vehicles are no longer flagged; the prototype flagged 80 of them.
@@ -131,13 +131,14 @@ The prototype matched policies by plate and kept only the last policy per plate,
 
 | Table | Key | Adds to the source columns |
 |---|---|---|
-| `registrations` | `chassis_no` | `plate` (canonical) and `vehicle_group` (2W, CAR, TAXI, LCV, TRUCK, BUS, 3W_P, 3W_G, ERICK, TRACTOR). Latest row per vehicle |
+| `plate_lookup` | `raw_plate` | Every distinct plate string in bronze (171,785 after the three drops), with its canonical `plate` and `plate_format`. Python parses each string once (`pipeline/plates.py`), so the SQL can simply join on it |
+| `registrations` | `chassis_no`, `last_updated` | `plate` (canonical), `vehicle_group` (2W, CAR, TAXI, LCV, TRUCK, BUS, 3W_P, 3W_G, ERICK or TRACTOR, from `ref/vehicle_classes.csv`) and `is_current`. One row per version of a vehicle, so the 10 ownership transfers give 10 extra rows; gold builds `dim_vehicle`'s history from them |
 | `policies` | `policy_id` | `plate` (NULL for `NEW`), `has_tp_cover`, `filed_under_new` |
-| `theft_shredding` | `case_id` | `plate`, `chassis_no` filled from the registry when missing, `case_type` (`STOLEN` or `SCRAPPED`). Latest row per case |
+| `theft_shredding` | `case_id` | `plate`, `chassis_no` filled from the registry when missing (`chassis_from_plate` = 1), `case_type` (`STOLEN` or `SCRAPPED`). Latest row per case |
 | `capture_log` | `capture_id` | `plate`, `read_status`, the matched vehicle's `chassis_no`, `is_duplicate` |
-| `ref_states`, `ref_rto_offices`, `ref_toll_plazas`, `ref_city_cameras`, `ref_insurers` | their codes | Loaded as they are from `ref/`, which is already clean |
+| `ref_states`, `ref_rto_offices`, `ref_toll_plazas`, `ref_city_cameras`, `ref_insurers`, `ref_vehicle_classes` | their codes | Loaded as they are from `ref/`, which is already clean |
 
-Each silver row also carries `dwh_batch_id`, the batch that last changed it, so gold processes only what changed.
+Each silver row carries `dwh_batch_id`, the bronze batch it came from, so gold can tell what is new since its last run.
 
 **Control** (database `etl`):
 
@@ -151,10 +152,10 @@ Each silver row also carries `dwh_batch_id`, the batch that last changed it, so 
 
 1. Open a batch in `etl.batch` with its `as_of` date.
 2. Bronze: copy the four sources past their watermarks, up to the end of `as_of`. The copies and the new watermarks are committed together, so a failed copy changes nothing.
-3. Silver: the `ref_*` tables when they change, then registrations, policies, theft cases and camera reads. Registrations go first, so a vehicle registered today matches today's reads.
+3. Silver, rebuilt in full from bronze: the `ref_*` tables and the plate lookup, then registrations, policies, theft cases and camera reads. Registrations go first, so a vehicle registered today matches today's reads.
 4. Quality checks on silver. A failure stops the batch here, before gold changes.
 5. Gold: `dim_state`, `dim_location`, `dim_insurer` and `dim_vehicle`; then `fact_policy`, `fact_theft_case` and `fact_sighting`; then `fact_compliance_monthly`. Last, retry the `-1` vehicle keys left by earlier nights.
-6. Quality checks on gold, then close the batch as `SUCCESS` or `FAILED`. Silver and gold record the last bronze batch they processed, so a failed night is simply run again and each layer picks up where it stopped.
+6. Quality checks on gold, then close the batch as `SUCCESS` or `FAILED`. Silver is rebuilt on every run and gold records the last bronze batch it processed, so a failed night is simply run again.
 
 `dim_date` is generated once (2008 to 2030) and is not part of the nightly run.
 
@@ -173,7 +174,7 @@ Each silver row also carries `dwh_batch_id`, the batch that last changed it, so 
 - Flags start with `is_` or `has_` and hold 0 or 1. Counts and durations name their unit: `cover_days`, `vehicle_age_years`, `sightings_in_month`.
 - Technical columns start with `dwh_`: `dwh_batch_id`, `dwh_loaded_at`.
 - Code values are uppercase: `INSURED`, `TOLL_ANPR`, `MATCHED`.
-- Files: DDL in `mysql/etl/`, `mysql/bronze/`, `mysql/silver/` and `mysql/gold/`; Python in `pipeline/load_bronze.py`, `pipeline/load_silver.py` and `pipeline/load_gold.py`, run in that order by `run_pipeline.py`, with the run log in `pipeline/runlog.py`.
+- Files: DDL in `mysql/etl/`, `mysql/bronze/`, `mysql/silver/` and `mysql/gold/`; Python in `pipeline/load_bronze.py`, `pipeline/load_silver.py` and `pipeline/load_gold.py`, run in that order by `run_pipeline.py`, with the run log in `pipeline/runlog.py` and the plate parser in `pipeline/plates.py`. Mappings live in `ref/` as CSV files, not in code.
 
 ## 11. Invariants
 
@@ -183,7 +184,7 @@ These become the quality tests in roadmap step 5.
 - Every fact key finds its dimension row (`-1` included).
 - Each chassis has exactly one current row in `dim_vehicle`, and its versions never overlap.
 - Status columns hold only the values in rule 8, and `read_status` only the four in rule 5.
-- Row counts reconcile: new bronze reads equal new silver reads, and silver reads not flagged as duplicates equal new `fact_sighting` rows.
+- Row counts reconcile: bronze and silver hold the same camera reads, and the silver reads not flagged as duplicates equal the `fact_sighting` rows.
 - At least 90% of a night's reads match a vehicle (normal nights: 95.5% to 98.1%). A sudden drop usually means a source changed its plate format.
 
 ## 12. Decisions to review

@@ -16,6 +16,7 @@ EXPECTED = {
     "theft_records": "theft_shredding",
     "vehicle_dwh": "vehicle_360",       # prototype, until gold.vehicle_360 exists
     "bronze": "capture_log",
+    "silver": "capture_log",
     "etl": "batch",
 }
 

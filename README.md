@@ -37,7 +37,7 @@ flowchart LR
     B --> S --> GD
     GD --> DB & M & V
     classDef planned stroke-dasharray: 5 5
-    class S,GD,DB,M planned
+    class GD,DB,M planned
 ```
 
 The four sources have no foreign keys between them; the warehouse is the only place they meet. It is organised in three layers:
@@ -46,7 +46,7 @@ The four sources have no foreign keys between them; the warehouse is the only pl
 - **Silver** cleans and conforms them: it parses plate numbers, gives each vehicle a single identity, works out insurance coverage periods and current theft status, and flags bad camera reads.
 - **Gold** is a star schema of facts and dimensions that keeps history, so trends can be analysed.
 
-Bronze is built; dashed boxes are planned. Until gold exists, a prototype ETL (`run_etl.py`) still builds `vehicle_360` straight from the sources. It will be rebuilt on top of the gold layer. The design for all three layers is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
+Bronze and silver are built; dashed boxes are planned. Until gold exists, a prototype ETL (`run_etl.py`) still builds `vehicle_360` straight from the sources. It will be rebuilt on top of the gold layer. The design for all three layers is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
 ## Status
 
@@ -58,8 +58,8 @@ Bronze is built; dashed boxes are planned. Until gold exists, a prototype ETL (`
 | Prototype ETL (`run_etl.py`) → `vehicle_360` + Streamlit lookup app | Done; to be rebuilt on the warehouse layers |
 | Warehouse design (`docs/DATA_MODEL.md`) | Done |
 | Bronze layer: raw copies per batch, with a run log and watermarks (`run_pipeline.py`) | Done |
-| Silver layer: cleaned and conformed | Next |
-| Gold layer: star schema with history | Planned |
+| Silver layer: cleaned and conformed, rebuilt from bronze on every run | Done |
+| Gold layer: star schema with history | Next |
 | Data quality tests | Planned |
 | Nightly orchestration | Planned |
 | SQL marts and analytics dashboard | Planned |
@@ -77,6 +77,7 @@ mysql -u root -p < mysql/00_setup_mysql.sql            # the iia_app user and al
 mysql -u root -p -e "SET PERSIST local_infile = 1;"   # allow LOAD DATA LOCAL
 $M < mysql/etl/ddl_etl.sql                             # run log and watermarks
 $M < mysql/bronze/ddl_bronze.sql                       # bronze tables
+$M < mysql/silver/ddl_silver.sql                       # silver tables
 
 # 1. generate the data (~35 s; writes sources/, daily/, answer_key/)
 python3 generate_realistic_data.py
@@ -86,7 +87,7 @@ $M < mysql/01_create_source_tables.sql
 $M < mysql/02_load_base.sql
 
 # 3. run that night: the warehouse pipeline, then the prototype ETL
-python3 run_pipeline.py --as-of 2026-11-03             # copies everything into bronze
+python3 run_pipeline.py --as-of 2026-11-03             # fills bronze, then builds silver
 python3 run_etl.py                                     # prototype: builds vehicle_360
 
 # 4. the next three nights: load the day's drop, then run both again
@@ -101,7 +102,7 @@ streamlit run app.py                                   # Ctrl+C to stop
 python3 evaluate_etl.py
 ```
 
-Each pipeline run copies only the changes made since the previous one, and it logs what it did in `etl.batch` and `etl.step_log`. A failed run changes nothing, so you fix the cause and rerun the same command.
+Each pipeline run copies only the new changes into bronze, then rebuilds silver from bronze (about 30 seconds in all), and logs every step in `etl.batch` and `etl.step_log`. If a run fails, fix the cause and rerun the same command.
 
 `01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties bronze and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
 
@@ -153,9 +154,9 @@ Because the data is simulated, the true status of every vehicle is known (`answe
 
 1. **Design** (done). Define the grain of each fact, the star schema, naming conventions and a data catalog: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 2. **Bronze** (done). Extract incrementally from the four sources using their change-tracking columns (`ingested_at`, `issued_at`, `last_updated`, `updated_at`), and log each batch.
-3. **Silver.** This is where the prototype's 6,447 wrongful flags get fixed:
+3. **Silver** (done). Clean and conform the sources, removing the causes of the prototype's 6,447 wrongful flags:
    - identify each vehicle by chassis number
-   - parse plates into their parts
+   - parse every plate into one format
    - compute third-party coverage periods (own-damage-only policies don't count)
    - keep the current theft status
    - map insurer names (Reliance General → IndusInd)
@@ -174,12 +175,13 @@ Because the data is simulated, the true status of every vehicle is known (`answe
 
 ```
 ├── generate_realistic_data.py   calibrated data generator (standard library only, seeded)
-├── ref/                         real reference data + the scripts that built it
+├── ref/                         real reference data, the pipeline's mappings, and the scripts that built them
 ├── mysql/                       00 setup · 01 tables · 02 base load · 03 nightly loads · 04 checks
 │   ├── etl/                     run log and watermark tables, reset_warehouse.sql
-│   └── bronze/                  bronze tables
+│   ├── bronze/                  bronze tables
+│   └── silver/                  silver tables
 ├── run_pipeline.py              one night of the warehouse pipeline (--as-of YYYY-MM-DD)
-├── pipeline/                    one module per layer (bronze so far) and the run log
+├── pipeline/                    one module per layer (bronze and silver so far), the plate parser, the run log
 ├── docs/DATA_MODEL.md           warehouse design: grain, star schema, rules, naming, catalog
 ├── run_etl.py                   prototype: extract → standardize → decide → upsert into vehicle_360
 ├── app.py                       Streamlit lookup and flagged-vehicle report

@@ -6,9 +6,10 @@ run_pipeline.py -- one nightly run of the warehouse pipeline.
 
 A run covers everything up to the end of its as_of day. It opens a batch in etl.batch,
 runs the layers in order, and closes the batch as SUCCESS or FAILED. If a run fails,
-fix the cause and run the same command again.
+fix the cause and run the same command again: a failed bronze copy changes nothing,
+and silver is rebuilt in full on every run.
 
-Only bronze exists so far; silver and gold slot in where marked below.
+Bronze and silver exist so far; gold slots in where marked below.
 """
 
 import argparse
@@ -18,7 +19,7 @@ from datetime import date, timedelta
 
 import mysql.connector
 
-from pipeline import load_bronze, runlog
+from pipeline import load_bronze, load_silver, runlog
 
 
 def parse_args():
@@ -36,7 +37,7 @@ def main():
         last = runlog.last_successful_as_of()
     except mysql.connector.Error as e:
         sys.exit(f"Cannot read the run log ({e.msg}).\n"
-                 "Run mysql/etl/ddl_etl.sql and mysql/bronze/ddl_bronze.sql first (see README).")
+                 "Run the DDL files in mysql/etl, mysql/bronze and mysql/silver first (see README).")
     if last is not None and as_of < last:
         sys.exit(f"The warehouse already covers up to {last}, so as_of {as_of} is in the past.\n"
                  "To replay from scratch, run mysql/etl/reset_warehouse.sql first.")
@@ -47,12 +48,15 @@ def main():
     try:
         for source, rows, old_wm, new_wm in load_bronze.run(batch_id, as_of):
             print(f"  bronze <- {source:<31} {rows:>8,} rows   watermark {old_wm or '-'} -> {new_wm or '-'}")
-        # load_silver.run(batch_id, as_of)   <- roadmap step 3
+        steps, (matched, reads) = load_silver.run(batch_id, as_of)
+        for step, rows in steps:
+            print(f"  {step:<41} {rows:>8,} rows")
+        print(f"  camera reads matched to a vehicle: {matched:,} of {reads:,} ({100 * matched / max(1, reads):.1f}%)")
         # load_gold.run(batch_id, as_of)     <- roadmap step 4
     except Exception as e:
         runlog.close_batch(batch_id, "FAILED", str(e)[:500])
         sys.exit(f"Batch {batch_id} FAILED: {e}\n"
-                 "Nothing was changed. Fix the cause and run the same command again.")
+                 "Fix the cause and run the same command again.")
     runlog.close_batch(batch_id, "SUCCESS")
     print(f"SUCCESS in {time.perf_counter() - started:.1f} s")
 

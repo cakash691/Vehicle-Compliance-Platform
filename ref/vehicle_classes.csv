@@ -1,0 +1,11 @@
+vehicle_class,vehicle_group,description
+M-Cycle/Scooter,2W,Motorcycle or scooter
+Motor Car,CAR,Private car or jeep
+Motor Cab,TAXI,Taxi
+Goods Carrier (LGV),LCV,Light goods vehicle
+Goods Carrier (HGV),TRUCK,Heavy goods vehicle
+Bus,BUS,Bus
+Three Wheeler (Passenger),3W_P,Passenger auto-rickshaw
+Three Wheeler (Goods),3W_G,Goods three-wheeler
+e-Rickshaw (P),ERICK,Electric rickshaw
+Agricultural Tractor,TRACTOR,Tractor
