@@ -13,7 +13,7 @@ The warehouse is built to answer questions such as:
 - How many two-wheelers lapse after their first policy?
 - Where do stolen vehicles turn up?
 
-On 4 August 2026, the Supreme Court directed that ANPR cameras be integrated with the IIB and VAHAN databases so that uninsured vehicles receive automatic e-challans ([report](https://www.thelawadvice.com/news/sc-orders-automatic-e-challans-for-uninsured-vehicles-directs-4-year-insurance-for-new-cars-6-years-for-two-wheelers)). That is the same integration this warehouse performs, aimed at analysis rather than enforcement. The project grew out of an earlier one, [Identification-of-Uninsured-Vehicles](https://github.com/cakash691/Identification-of-Uninsured-Vehicles).
+On 4 August 2026, the Supreme Court directed that ANPR cameras be integrated with the IIB and VAHAN databases so that uninsured vehicles receive automatic e-challans ([report](https://www.thelawadvice.com/news/sc-orders-automatic-e-challans-for-uninsured-vehicles-directs-4-year-insurance-for-new-cars-6-years-for-two-wheelers)). That is the same integration this warehouse performs, aimed at analysis rather than enforcement.
 
 ## Architecture
 
