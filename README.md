@@ -61,8 +61,8 @@ All three layers are built; dashed boxes are planned. The design is in [docs/DAT
 | Silver layer: cleaned and conformed, rebuilt from bronze on every run | Done |
 | Gold layer: star schema with history, and the `vehicle_360` view | Done |
 | Data quality checks after silver and after gold (`pipeline/checks.py`) | Done |
-| Nightly orchestration | Next |
-| SQL marts and analytics dashboard | Planned |
+| Nightly schedule (`scripts/`): launchd on a Mac, cron on Linux | Done |
+| SQL marts and analytics dashboard | Next |
 
 ## Quick start (macOS)
 
@@ -114,6 +114,20 @@ $M -e "SELECT step, status, rows_affected, message FROM etl.step_log
 ```
 
 `01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties the three layers and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
+
+## Nightly schedule
+
+`scripts/run_nightly.sh` is the one command a scheduler calls. It runs the pipeline for yesterday and appends to `logs/pipeline_YYYY-MM-DD.log` (kept for 30 days); on a Mac, a failed night also shows a notification. To schedule it on a Mac:
+
+```bash
+bash scripts/schedule_nightly.sh                                    # every night at 00:05
+launchctl kickstart gui/$(id -u)/local.vehicle-compliance.nightly   # run it once now, to test
+bash scripts/schedule_nightly.sh remove                             # stop the schedule
+```
+
+It uses launchd rather than cron because a MacBook is usually asleep at midnight: cron skips a run it misses, while launchd runs it as soon as the Mac wakes. macOS does not let scheduled jobs read `~/Desktop`, `~/Documents` or `~/Downloads`, so keep the repo somewhere else, such as `~/Projects`; the script checks this. On a Linux server, the same job is one cron line: `5 0 * * * /bin/bash /path/to/repo/scripts/run_nightly.sh`.
+
+A missed night needs no special handling, because the next run copies everything since the watermarks. To watch the schedule pick up new data, load the next daily drop during the day; the 00:05 run copies it.
 
 ## The data
 
@@ -179,7 +193,7 @@ The warehouse scores 100% because its rules follow the same definitions the simu
    - a monthly compliance snapshot
    - date, state, vehicle (with history), location and insurer dimensions, with stable surrogate keys
 5. **Quality checks** (done) that stop a bad batch before it reaches gold, recorded in the run log: [docs/DATA_MODEL.md, section 11](docs/DATA_MODEL.md#11-quality-checks).
-6. **Nightly orchestration:** one command, scheduled with cron.
+6. **Nightly schedule** (done). One command, `scripts/run_nightly.sh`, run at 00:05 by launchd on a Mac (cron on Linux).
 7. **Analytics:** SQL marts and a dashboard, with `vehicle_360` rebuilt as a gold view for the lookup app.
 
 ## Repository layout
@@ -193,6 +207,7 @@ The warehouse scores 100% because its rules follow the same definitions the simu
 │   ├── silver/                  silver tables
 │   └── gold/                    gold tables and the vehicle_360 view
 ├── run_pipeline.py              one night of the warehouse pipeline (--as-of YYYY-MM-DD)
+├── scripts/                     the nightly job, and the script that schedules it on a Mac
 ├── pipeline/                    one module per layer, the quality checks, the plate parser, the run log
 ├── docs/DATA_MODEL.md           warehouse design: grain, star schema, rules, naming, catalog
 ├── run_etl.py                   prototype: extract → standardize → decide → upsert into vehicle_360
@@ -203,7 +218,7 @@ The warehouse scores 100% because its rules follow the same definitions the simu
 ├── .streamlit/config.toml       app theme
 ├── DATA_SOURCES.md              provenance and assumptions
 ├── calibration_report.md        simulated vs official figures
-└── sources/ daily/ answer_key/  generated locally, not committed
+└── sources/ daily/ answer_key/  generated locally, not committed (logs/ too)
 ```
 
 Author: Akash Chakraborty, M.Tech CSE, IIIT-Delhi

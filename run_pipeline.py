@@ -48,8 +48,13 @@ def main():
         runlog.close_abandoned_batches()
         last = runlog.last_successful_as_of()
     except mysql.connector.Error as e:
-        sys.exit(f"Cannot read the run log ({e.msg}).\n"
-                 "Run the DDL files in mysql/etl, mysql/bronze, mysql/silver and mysql/gold first (see README).")
+        if e.errno in (2002, 2003, 2005, 2013):                     # the server cannot be reached
+            hint = "Is MySQL running? On a Mac: brew services start mysql"
+        elif e.errno == 1045:                                       # access denied
+            hint = "The iia_app user is missing or has another password: run mysql/00_setup_mysql.sql (see README)."
+        else:
+            hint = "Run the DDL files in mysql/etl, mysql/bronze, mysql/silver and mysql/gold first (see README)."
+        sys.exit(f"Cannot read the run log ({e.msg}).\n{hint}")
     if last is not None and as_of < last:
         sys.exit(f"The warehouse already covers up to {last}, so as_of {as_of} is in the past.\n"
                  "To replay from scratch, run mysql/etl/reset_warehouse.sql first.")

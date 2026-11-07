@@ -1,6 +1,6 @@
 # Data model
 
-Status, 7 Nov 2026: bronze, silver, gold, the quality checks and the run log are built. Nightly scheduling and the marts come next. Until the choices in section 12 are settled, the defaults described there apply.
+Status, 7 Nov 2026: bronze, silver, gold, the quality checks, the run log and the nightly schedule are built. The marts and the dashboard come next. Until the choices in section 12 are settled, the defaults described there apply.
 
 This document fixes the design before any warehouse SQL is written: the questions the warehouse must answer, what one row means in each table, how keys and history work, the cleaning rules, the naming conventions, and a column-level catalog of the gold layer.
 
@@ -157,7 +157,9 @@ Each silver row carries `dwh_batch_id`, the bronze batch it came from, so gold c
 5. Gold: the dimensions (`dim_date` once, then `dim_state`, `dim_location`, `dim_insurer` and `dim_vehicle`), then `fact_policy`, `fact_sighting`, `fact_theft_case` and `fact_compliance_monthly`. Policies and camera reads that matched no vehicle on an earlier night are tried again. Each step commits as one transaction.
 6. Quality checks on gold, then close the batch as `SUCCESS` or `FAILED`. Silver is rebuilt on every run, and gold adds only what it does not have yet (matched on source ids), so a failed night is simply run again. A MySQL named lock allows one run at a time, and a batch left `RUNNING` by a run that died is marked `FAILED` by the next one.
 
-`dim_date` is generated once (2008 to 2030) and is not part of the nightly run.
+`dim_date` is generated once and is not part of the nightly run.
+
+The nightly job, `scripts/run_nightly.sh`, runs these steps at 00:05 with `as_of` set to yesterday. On a Mac, launchd schedules it and runs a missed night as soon as the Mac wakes; on Linux, cron does. A night that is missed altogether needs no special handling: the next run copies everything since the watermarks and rebuilds every month since the last one stored.
 
 ## 9. Views
 

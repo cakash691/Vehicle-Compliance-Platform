@@ -16,3 +16,6 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Nightly job logs (scripts/run_nightly.sh)
+/logs/
