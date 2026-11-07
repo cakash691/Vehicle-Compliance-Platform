@@ -1,7 +1,7 @@
 """db_config.py -- single place holding the MySQL connection details.
-All 5 databases (4 sources + warehouse) live on this one local server,
-each fully separate -- no cross-database foreign keys, matching the
-"designed in isolation" premise of the brief.
+All the databases (the 4 sources and the warehouse layers) live on this one
+local server, each fully separate -- no cross-database foreign keys, because
+the four sources were designed in isolation.
 """
 
 import mysql.connector

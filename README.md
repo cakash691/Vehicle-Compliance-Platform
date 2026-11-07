@@ -37,7 +37,7 @@ flowchart LR
     B --> S --> GD
     GD --> DB & M & V
     classDef planned stroke-dasharray: 5 5
-    class B,S,GD,DB,M planned
+    class S,GD,DB,M planned
 ```
 
 The four sources have no foreign keys between them; the warehouse is the only place they meet. It is organised in three layers:
@@ -46,7 +46,7 @@ The four sources have no foreign keys between them; the warehouse is the only pl
 - **Silver** cleans and conforms them: it parses plate numbers, gives each vehicle a single identity, works out insurance coverage periods and current theft status, and flags bad camera reads.
 - **Gold** is a star schema of facts and dimensions that keeps history, so trends can be analysed.
 
-Dashed boxes are planned. Today, a prototype ETL (`run_etl.py`) builds `vehicle_360` straight from the sources. It will be rebuilt on top of the gold layer.
+Bronze is built; dashed boxes are planned. Until gold exists, a prototype ETL (`run_etl.py`) still builds `vehicle_360` straight from the sources. It will be rebuilt on top of the gold layer. The design for all three layers is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
 ## Status
 
@@ -56,46 +56,54 @@ Dashed boxes are planned. Today, a prototype ETL (`run_etl.py`) builds `vehicle_
 | Bulk load and three nightly drops (`mysql/`) | Done |
 | Accuracy scoring against ground truth (`evaluate_etl.py`) | Done |
 | Prototype ETL (`run_etl.py`) → `vehicle_360` + Streamlit lookup app | Done; to be rebuilt on the warehouse layers |
-| Bronze layer: raw copies per batch | Next |
-| Silver layer: cleaned and conformed | Planned |
+| Warehouse design (`docs/DATA_MODEL.md`) | Done |
+| Bronze layer: raw copies per batch, with a run log and watermarks (`run_pipeline.py`) | Done |
+| Silver layer: cleaned and conformed | Next |
 | Gold layer: star schema with history | Planned |
-| Data quality tests and run log | Planned |
+| Data quality tests | Planned |
 | Nightly orchestration | Planned |
 | SQL marts and analytics dashboard | Planned |
 
 ## Quick start (macOS)
 
 ```bash
+M="mysql --local-infile=1 -h 127.0.0.1 -u iia_app -piia_app_pw"   # used by every step below
+
 # one-time setup
 brew install mysql && brew services start mysql
 python3 -m venv venv && source venv/bin/activate
 pip install mysql-connector-python pandas streamlit
-mysql -u root -p < mysql/00_setup_mysql.sql            # 5 databases + the iia_app user
+mysql -u root -p < mysql/00_setup_mysql.sql            # the iia_app user and all databases
 mysql -u root -p -e "SET PERSIST local_infile = 1;"   # allow LOAD DATA LOCAL
+$M < mysql/etl/ddl_etl.sql                             # run log and watermarks
+$M < mysql/bronze/ddl_bronze.sql                       # bronze tables
 
 # 1. generate the data (~35 s; writes sources/, daily/, answer_key/)
 python3 generate_realistic_data.py
 
-# 2. load the four source databases
-M="mysql --local-infile=1 -h 127.0.0.1 -u iia_app -piia_app_pw"
+# 2. load the four source databases, up to the night of 3 Nov 2026
 $M < mysql/01_create_source_tables.sql
 $M < mysql/02_load_base.sql
 
-# 3. integrate and explore
-python3 run_etl.py
+# 3. run that night: the warehouse pipeline, then the prototype ETL
+python3 run_pipeline.py --as-of 2026-11-03             # copies everything into bronze
+python3 run_etl.py                                     # prototype: builds vehicle_360
+
+# 4. the next three nights: load the day's drop, then run both again
+for d in 04 05 06; do
+  $M < mysql/03_load_daily_2026-11-$d.sql
+  python3 run_pipeline.py --as-of 2026-11-$d && python3 run_etl.py
+done
+
+# 5. explore the prototype and score it against the ground truth
 python3 check_connections.py
 streamlit run app.py                                   # Ctrl+C to stop
-
-# 4. nightly batches: load one day's drop, then rerun the ETL (it processes only new reads)
-$M < mysql/03_load_daily_2026-11-04.sql && python3 run_etl.py
-$M < mysql/03_load_daily_2026-11-05.sql && python3 run_etl.py
-$M < mysql/03_load_daily_2026-11-06.sql && python3 run_etl.py
-
-# 5. score the warehouse against the ground truth
 python3 evaluate_etl.py
 ```
 
-`01_create_source_tables.sql` drops and recreates the four source tables and resets the warehouse, so the whole sequence can be rerun from scratch. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
+Each pipeline run copies only the changes made since the previous one, and it logs what it did in `etl.batch` and `etl.step_log`. A failed run changes nothing, so you fix the cause and rerun the same command.
+
+`01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties bronze and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
 
 ## The data
 
@@ -143,8 +151,8 @@ Because the data is simulated, the true status of every vehicle is known (`answe
 
 ## Roadmap
 
-1. **Design.** Define the grain of each fact, the star schema, naming conventions and a data catalog, in `docs/`.
-2. **Bronze.** Extract incrementally from the four sources using their change-tracking columns (`ingested_at`, `issued_at`, `last_updated`, `updated_at`), and log each batch.
+1. **Design** (done). Define the grain of each fact, the star schema, naming conventions and a data catalog: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
+2. **Bronze** (done). Extract incrementally from the four sources using their change-tracking columns (`ingested_at`, `issued_at`, `last_updated`, `updated_at`), and log each batch.
 3. **Silver.** This is where the prototype's 6,447 wrongful flags get fixed:
    - identify each vehicle by chassis number
    - parse plates into their parts
@@ -157,8 +165,8 @@ Because the data is simulated, the true status of every vehicle is known (`answe
    - `fact_policy`
    - `fact_theft_case`
    - a monthly compliance snapshot
-   - date, vehicle (with history), location and insurer dimensions, with stable surrogate keys
-5. **Quality tests** that stop a bad batch, plus a run log.
+   - date, state, vehicle (with history), location and insurer dimensions, with stable surrogate keys
+5. **Quality tests** that stop a bad batch before it reaches gold, recorded in the run log.
 6. **Nightly orchestration:** one command, scheduled with cron.
 7. **Analytics:** SQL marts and a dashboard, with `vehicle_360` rebuilt as a gold view for the lookup app.
 
@@ -168,10 +176,15 @@ Because the data is simulated, the true status of every vehicle is known (`answe
 ├── generate_realistic_data.py   calibrated data generator (standard library only, seeded)
 ├── ref/                         real reference data + the scripts that built it
 ├── mysql/                       00 setup · 01 tables · 02 base load · 03 nightly loads · 04 checks
-├── run_etl.py                   extract → standardize → decide → upsert into vehicle_360
+│   ├── etl/                     run log and watermark tables, reset_warehouse.sql
+│   └── bronze/                  bronze tables
+├── run_pipeline.py              one night of the warehouse pipeline (--as-of YYYY-MM-DD)
+├── pipeline/                    one module per layer (bronze so far) and the run log
+├── docs/DATA_MODEL.md           warehouse design: grain, star schema, rules, naming, catalog
+├── run_etl.py                   prototype: extract → standardize → decide → upsert into vehicle_360
 ├── app.py                       Streamlit lookup and flagged-vehicle report
 ├── db_config.py                 MySQL connection settings (local, throwaway credentials)
-├── check_connections.py         verifies all five databases are reachable
+├── check_connections.py         verifies every database is reachable
 ├── evaluate_etl.py              scores vehicle_360 against the answer key
 ├── .streamlit/config.toml       app theme
 ├── DATA_SOURCES.md              provenance and assumptions

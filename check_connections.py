@@ -1,7 +1,7 @@
 """
-check_connections.py -- standalone proof of communication with all 5
-databases. Does nothing with the data itself; only verifies
-each source is reachable, correctly identified, and genuinely live.
+check_connections.py -- standalone proof of communication with every
+database. Does nothing with the data itself; only verifies each one
+is reachable, correctly identified, and genuinely live.
 """
 
 import time
@@ -14,7 +14,9 @@ EXPECTED = {
     "insurance": "policies",
     "rto_registration": "registrations",
     "theft_records": "theft_shredding",
-    "vehicle_dwh": "vehicle_360",
+    "vehicle_dwh": "vehicle_360",       # prototype, until gold.vehicle_360 exists
+    "bronze": "capture_log",
+    "etl": "batch",
 }
 
 print(f"{'DATABASE':<18}{'CONNECTED':<11}{'TABLE FOUND':<16}{'ROW COUNT':<11}{'LATENCY'}")
@@ -34,5 +36,5 @@ for db, table in EXPECTED.items():
         print(f"{db:<18}{'NO':<11}{'-':<16}{'-':<11}{type(e).__name__}: {e}")
 
 print()
-print("All 5 connections established successfully." if all_ok
+print(f"All {len(EXPECTED)} connections established successfully." if all_ok
       else "One or more connections FAILED -- see above.")
