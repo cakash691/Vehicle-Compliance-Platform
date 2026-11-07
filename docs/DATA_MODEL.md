@@ -97,8 +97,6 @@ Which dimensions each fact uses, and in what role:
 
 ## 6. Cleaning rules (silver)
 
-An earlier prototype matched policies by plate and kept only the last policy per plate, so `NEW` filings, the insurers' different plate formats and `Standalone OD` policies flagged 6,447 insured vehicles as uninsured. Rules 1 to 3 remove those causes.
-
 1. **One plate format.** Uppercase the plate and drop spaces and hyphens, then parse it as one of three patterns:
    - standard: state code, RTO number padded to two digits, one or two series letters, four digits. `MH-4-AB-1234` becomes `MH04AB1234`
    - Delhi: RTO number without a leading zero, then the class letter and series. `DL-06-SCP-2349` becomes `DL6SCP2349`
