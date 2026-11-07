@@ -37,7 +37,7 @@ flowchart LR
     B --> S --> GD
     GD --> DB & M & V
     classDef planned stroke-dasharray: 5 5
-    class GD,DB,M planned
+    class DB,M planned
 ```
 
 The four sources have no foreign keys between them; the warehouse is the only place they meet. It is organised in three layers:
@@ -46,7 +46,7 @@ The four sources have no foreign keys between them; the warehouse is the only pl
 - **Silver** cleans and conforms them: it parses plate numbers, gives each vehicle a single identity, works out insurance coverage periods and current theft status, and flags bad camera reads.
 - **Gold** is a star schema of facts and dimensions that keeps history, so trends can be analysed.
 
-Bronze and silver are built; dashed boxes are planned. Until gold exists, a prototype ETL (`run_etl.py`) still builds `vehicle_360` straight from the sources. It will be rebuilt on top of the gold layer. The design for all three layers is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
+All three layers are built; dashed boxes are planned. The design is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md). The prototype ETL (`run_etl.py`) still builds its own `vehicle_360` straight from the sources, so the two can be compared; the lookup app moves to `gold.vehicle_360` in step 7.
 
 ## Status
 
@@ -55,12 +55,12 @@ Bronze and silver are built; dashed boxes are planned. Until gold exists, a prot
 | Four source databases, loaded with calibrated data | Done |
 | Bulk load and three nightly drops (`mysql/`) | Done |
 | Accuracy scoring against ground truth (`evaluate_etl.py`) | Done |
-| Prototype ETL (`run_etl.py`) → `vehicle_360` + Streamlit lookup app | Done; to be rebuilt on the warehouse layers |
+| Prototype ETL (`run_etl.py`) → `vehicle_360` + Streamlit lookup app | Done; replaced by `gold.vehicle_360` (the app moves over in step 7) |
 | Warehouse design (`docs/DATA_MODEL.md`) | Done |
 | Bronze layer: raw copies per batch, with a run log and watermarks (`run_pipeline.py`) | Done |
 | Silver layer: cleaned and conformed, rebuilt from bronze on every run | Done |
-| Gold layer: star schema with history | Next |
-| Data quality tests | Planned |
+| Gold layer: star schema with history, and the `vehicle_360` view | Done |
+| Data quality tests | Next |
 | Nightly orchestration | Planned |
 | SQL marts and analytics dashboard | Planned |
 
@@ -78,6 +78,7 @@ mysql -u root -p -e "SET PERSIST local_infile = 1;"   # allow LOAD DATA LOCAL
 $M < mysql/etl/ddl_etl.sql                             # run log and watermarks
 $M < mysql/bronze/ddl_bronze.sql                       # bronze tables
 $M < mysql/silver/ddl_silver.sql                       # silver tables
+$M < mysql/gold/ddl_gold.sql                           # gold tables and the vehicle_360 view
 
 # 1. generate the data (~35 s; writes sources/, daily/, answer_key/)
 python3 generate_realistic_data.py
@@ -87,7 +88,7 @@ $M < mysql/01_create_source_tables.sql
 $M < mysql/02_load_base.sql
 
 # 3. run that night: the warehouse pipeline, then the prototype ETL
-python3 run_pipeline.py --as-of 2026-11-03             # fills bronze, then builds silver
+python3 run_pipeline.py --as-of 2026-11-03             # bronze, silver and gold (~3 min the first time)
 python3 run_etl.py                                     # prototype: builds vehicle_360
 
 # 4. the next three nights: load the day's drop, then run both again
@@ -96,15 +97,16 @@ for d in 04 05 06; do
   python3 run_pipeline.py --as-of 2026-11-$d && python3 run_etl.py
 done
 
-# 5. explore the prototype and score it against the ground truth
+# 5. explore, and score both against the ground truth
 python3 check_connections.py
 streamlit run app.py                                   # Ctrl+C to stop
-python3 evaluate_etl.py
+python3 evaluate_etl.py                                # the prototype
+python3 evaluate_etl.py --database gold                # the warehouse
 ```
 
-Each pipeline run copies only the new changes into bronze, then rebuilds silver from bronze (about 30 seconds in all), and logs every step in `etl.batch` and `etl.step_log`. If a run fails, fix the cause and rerun the same command.
+Each pipeline run copies the night's changes into bronze, rebuilds silver from bronze, and adds what is new to gold. The first run takes about 3 minutes because it fills 46 months of compliance history; later nights take under a minute. Every step is logged in `etl.batch` and `etl.step_log`. If a run fails, fix the cause and rerun the same command. Only one run can happen at a time.
 
-`01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties bronze and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
+`01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties the three layers and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
 
 ## The data
 
@@ -140,15 +142,17 @@ The generator is seeded, so `python3 generate_realistic_data.py` recreates byte-
 
 ## Measuring accuracy
 
-Because the data is simulated, the true status of every vehicle is known (`answer_key/`). `evaluate_etl.py` scores `vehicle_360` against it. This is the baseline for the prototype ETL, measured by running the quick start above:
+Because the data is simulated, the true status of every vehicle is known (`answer_key/`). `evaluate_etl.py` scores a `vehicle_360` against it: the prototype's, or the warehouse's with `--database gold`. Both measured by running the quick start above:
 
-| Metric | Prototype ETL |
-|---|---|
-| Status accuracy on real plates | 86.7% |
-| Insured vehicles wrongly flagged | 19.6% (6,447 of 32,859) |
-| Uninsured vehicles missed | 0 |
-| Stolen or scrapped vehicles caught | 67 of 67, plus 80 false alarms on recovered cases |
-| `vehicle_360` rows that are not real plates | 12,260 of 61,061 |
+| Metric | Prototype ETL | Warehouse (gold) |
+|---|---|---|
+| Status accuracy on real plates | 86.7% | 100% |
+| Insured vehicles wrongly flagged | 19.6% (6,447 of 32,859) | 0 |
+| Uninsured vehicles missed | 0 | 0 |
+| Stolen or scrapped vehicles caught | 67 of 67, plus 80 false alarms on recovered cases | 67 of 67, no false alarms |
+| `vehicle_360` rows that are not real plates | 12,260 of 61,061 | 0 of 48,801 |
+
+The warehouse scores 100% because its rules follow the same definitions the simulation uses for the truth. What the comparison shows is that matching vehicles by chassis number, putting every plate into one format and counting only third-party cover remove the prototype's errors; real-world data would not score this cleanly. The warehouse also reproduces the calibration figures: on 6 Nov 2026, 49.2% of registered vehicles and 29.2% of those seen on camera in the previous 90 days had no valid third-party cover.
 
 ## Roadmap
 
@@ -161,7 +165,7 @@ Because the data is simulated, the true status of every vehicle is known (`answe
    - keep the current theft status
    - map insurer names (Reliance General → IndusInd)
    - deduplicate camera reads and flag misreads
-4. **Gold.** Build the star schema:
+4. **Gold** (done). Build the star schema:
    - `fact_sighting`, recording the status at the moment of each camera read
    - `fact_policy`
    - `fact_theft_case`
@@ -179,15 +183,16 @@ Because the data is simulated, the true status of every vehicle is known (`answe
 ├── mysql/                       00 setup · 01 tables · 02 base load · 03 nightly loads · 04 checks
 │   ├── etl/                     run log and watermark tables, reset_warehouse.sql
 │   ├── bronze/                  bronze tables
-│   └── silver/                  silver tables
+│   ├── silver/                  silver tables
+│   └── gold/                    gold tables and the vehicle_360 view
 ├── run_pipeline.py              one night of the warehouse pipeline (--as-of YYYY-MM-DD)
-├── pipeline/                    one module per layer (bronze and silver so far), the plate parser, the run log
+├── pipeline/                    one module per layer, the plate parser, the run log
 ├── docs/DATA_MODEL.md           warehouse design: grain, star schema, rules, naming, catalog
 ├── run_etl.py                   prototype: extract → standardize → decide → upsert into vehicle_360
 ├── app.py                       Streamlit lookup and flagged-vehicle report
 ├── db_config.py                 MySQL connection settings (local, throwaway credentials)
 ├── check_connections.py         verifies every database is reachable
-├── evaluate_etl.py              scores vehicle_360 against the answer key
+├── evaluate_etl.py              scores a vehicle_360 against the answer key (--database gold for the warehouse)
 ├── .streamlit/config.toml       app theme
 ├── DATA_SOURCES.md              provenance and assumptions
 ├── calibration_report.md        simulated vs official figures

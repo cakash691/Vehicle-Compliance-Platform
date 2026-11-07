@@ -5,7 +5,6 @@
 -- Run it whenever you recreate the source tables (01_create_source_tables.sql) and want
 -- to replay the simulated nights from scratch. Without it, run_pipeline.py stops with
 -- "looks reset", because the sources are now older than the stored watermarks.
--- Gold tables get added here when that layer is built.
 -- =====================================================================================
 
 TRUNCATE TABLE bronze.registrations;
@@ -19,6 +18,17 @@ TRUNCATE TABLE silver.registrations;
 TRUNCATE TABLE silver.policies;
 TRUNCATE TABLE silver.theft_shredding;
 TRUNCATE TABLE silver.capture_log;
+
+-- gold keeps history, so a replay starts it from empty too (the pipeline refills dim_date)
+TRUNCATE TABLE gold.fact_compliance_monthly;
+TRUNCATE TABLE gold.fact_theft_case;
+TRUNCATE TABLE gold.fact_sighting;
+TRUNCATE TABLE gold.fact_policy;
+TRUNCATE TABLE gold.dim_vehicle;
+TRUNCATE TABLE gold.dim_insurer;
+TRUNCATE TABLE gold.dim_location;
+TRUNCATE TABLE gold.dim_state;
+TRUNCATE TABLE gold.dim_date;
 
 TRUNCATE TABLE etl.watermark;
 TRUNCATE TABLE etl.step_log;

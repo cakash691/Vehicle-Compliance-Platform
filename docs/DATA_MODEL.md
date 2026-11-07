@@ -1,6 +1,6 @@
 # Data model
 
-Status, 7 Nov 2026: bronze, silver and the run log are built; gold is designed but not built yet. Until the choices in section 12 are settled, the defaults described there apply.
+Status, 7 Nov 2026: bronze, silver, gold and the run log are built. Quality tests, nightly scheduling and the marts come next. Until the choices in section 12 are settled, the defaults described there apply.
 
 This document fixes the design before any warehouse SQL is written: the questions the warehouse must answer, what one row means in each table, how keys and history work, the cleaning rules, the naming conventions, and a column-level catalog of the gold layer.
 
@@ -74,8 +74,8 @@ Which dimensions each fact uses, and in what role:
 | Fact | One row per | Kind | Rows now | Each night |
 |---|---|---|---|---|
 | `fact_sighting` | camera read, without duplicate lane reads | transaction | ~458,000 | Inserts the new reads (~1,500) |
-| `fact_policy` | policy | transaction | ~137,000 | Inserts the new policies (~80) |
-| `fact_theft_case` | theft or scrapping case | accumulating snapshot: the row is updated as the case moves | 616 | Upserts new and changed cases |
+| `fact_policy` | policy | transaction | ~137,000 | Inserts the new policies (~80), and retries any whose vehicle was not registered yet |
+| `fact_theft_case` | theft or scrapping case | accumulating snapshot: the row is updated as the case moves | 616 | Rewrites every case (there are few), so status, recovery and sightings stay current |
 | `fact_compliance_monthly` | vehicle per calendar month, from January 2023 | periodic snapshot | ~3.9 million | Deletes and rebuilds the current and previous month (~200,000 rows); older months are final |
 
 "Rows now" means after the base load and the three daily drops.
@@ -87,9 +87,9 @@ Which dimensions each fact uses, and in what role:
 - **Unknown members.** Every dimension has a row with key `-1` ("Unknown" or "Not yet"). A camera read that matches no vehicle gets `vehicle_key = -1`; an open theft case gets `recovery_date_key = -1`. Fact keys are never NULL, so inner joins never drop rows. The key is `-1` rather than `0` because MySQL treats an inserted `0` in an `AUTO_INCREMENT` column as "generate the next id".
 - **Natural keys** keep their source names: `chassis_no`, `camera_id`, `policy_id`, `case_id`, `capture_id`. Facts use their source id as the primary key (the monthly snapshot uses `month_key` plus `vehicle_key`), so re-running a night cannot insert a row twice.
 - **Vehicle history (SCD type 2).** `dim_vehicle` keeps one row per version of a vehicle, identified by `chassis_no`.
-  - A new version starts when any of these change: plate, RTO or state, owner (name, serial or type), registration status, registration validity. A change to any other column is a correction and overwrites the current row (type 1).
+  - A new version starts whenever the registry records a change to the vehicle: in this data, ownership transfers, registration renewals and scrapping. `chassis_no` plus the registry's `last_updated` identifies a version. (A stricter design would overwrite corrections to fixed details, such as a misspelt model, instead of versioning them; this registry never sends any.)
   - `valid_from` and `valid_to` bound each version. The current one has `valid_to = 9999-12-31` and `is_current = 1`. A new version starts on the registry's `last_updated` date, and the previous one ends the day before.
-  - The first version starts on `1900-01-01`, not on the load date, so events from before the warehouse existed (a policy bought days before registration, a sighting last year) still find a version.
+  - The first version starts on `1900-01-01`, not on the load date, so events from before the warehouse existed (a policy bought days before registration, a sighting last year) still find a version. Its registry status counts only from its `last_updated` date, so a vehicle already scrapped at the first load is not treated as scrapped for all of its past.
   - History starts with the warehouse. The registry keeps only the current row, so changes made before the first load cannot be recovered. From then on, bronze keeps every changed row and `dim_vehicle` keeps every version. The three daily drops contain 10 such changes, all ownership transfers.
 - **Point in time.** Each fact points at the vehicle version that was valid on the fact's own date: the capture date, the issue date, the report date, or the snapshot's `status_as_of`.
 - **Indexes.** Each fact is indexed on its dimension keys; `dim_vehicle` on `(chassis_no, valid_from)` and `(plate, valid_from)`.
@@ -109,7 +109,7 @@ The prototype matched policies by plate and kept only the last policy per plate,
 3. **Third-party cover.** Every policy type includes third-party (TP) cover except `Standalone OD`. The TP cover runs from `valid_from` to `valid_to`. For bundled policies, `valid_to` is the end of the TP term and `od_valid_to` the end of the one-year own-damage cover.
 4. **Insurer names** map through `ref/insurers.csv`. `Bharti AXA General Insurance` maps to `ICICI Lombard` (merged 8 Sep 2021), `Reliance General` to `IndusInd General Insurance` (renamed 22 Sep 2025), and New India, United India, Oriental and National are public sector.
 5. **Camera reads.** A second read of the same plate by the same camera within 5 seconds is an adjacent-lane duplicate: silver flags it and gold leaves it out. Each read gets a `read_status`: `UNREADABLE` (empty plate), `INVALID_FORMAT`, `NOT_IN_REGISTRY` (valid format but unknown: a misread or a fake plate) or `MATCHED`. Today 96.9% of reads match.
-6. **Scrapping.** A vehicle counts as scrapped from the date of its certificate from a registered vehicle scrapping facility (RVSF), which the feed records as a `SHREDDED` case. The registry's `SCRAPPED` status is used only when there is no certificate, because the registry is updated late or not at all.
+6. **Scrapping.** A vehicle counts as scrapped from the date of its certificate from a registered vehicle scrapping facility (RVSF), which the feed records as a `SHREDDED` case. Without a certificate, it counts as scrapped from the day the registry recorded it, which is later, or never.
 7. **Theft.** A vehicle counts as stolen from the report date up to, but not including, the recovery date. Recovered vehicles are no longer flagged; the prototype flagged 80 of them.
 8. **Status on a date.** One rule for every fact; the first match wins:
 
@@ -154,15 +154,15 @@ Each silver row carries `dwh_batch_id`, the bronze batch it came from, so gold c
 2. Bronze: copy the four sources past their watermarks, up to the end of `as_of`. The copies and the new watermarks are committed together, so a failed copy changes nothing.
 3. Silver, rebuilt in full from bronze: the `ref_*` tables and the plate lookup, then registrations, policies, theft cases and camera reads. Registrations go first, so a vehicle registered today matches today's reads.
 4. Quality checks on silver. A failure stops the batch here, before gold changes.
-5. Gold: `dim_state`, `dim_location`, `dim_insurer` and `dim_vehicle`; then `fact_policy`, `fact_theft_case` and `fact_sighting`; then `fact_compliance_monthly`. Last, retry the `-1` vehicle keys left by earlier nights.
-6. Quality checks on gold, then close the batch as `SUCCESS` or `FAILED`. Silver is rebuilt on every run and gold records the last bronze batch it processed, so a failed night is simply run again.
+5. Gold: the dimensions (`dim_date` once, then `dim_state`, `dim_location`, `dim_insurer` and `dim_vehicle`), then `fact_policy`, `fact_sighting`, `fact_theft_case` and `fact_compliance_monthly`. Policies and camera reads that matched no vehicle on an earlier night are tried again. Each step commits as one transaction.
+6. Quality checks on gold, then close the batch as `SUCCESS` or `FAILED`. Silver is rebuilt on every run, and gold adds only what it does not have yet (matched on source ids), so a failed night is simply run again. A MySQL named lock allows one run at a time, and a batch left `RUNNING` by a run that died is marked `FAILED` by the next one.
 
 `dim_date` is generated once (2008 to 2030) and is not part of the nightly run.
 
 ## 9. Views
 
 - The `mart_*` views from section 1, for the dashboard and EDA.
-- `vehicle_360`: one row per vehicle seen on camera, with its latest sighting and current status. It keeps the prototype table's columns and status wording, so `evaluate_etl.py` can score the warehouse. `app.py` and `evaluate_etl.py` then read it from `gold` instead of `vehicle_dwh`, and the prototype's `run_etl.py` and `vehicle_dwh` database are retired.
+- `vehicle_360` (built with gold): one row per vehicle seen on camera, with its latest sighting, latest third-party policy and status on the latest `as_of`. It keeps the prototype table's columns and status wording, so `python3 evaluate_etl.py --database gold` scores the warehouse. In step 7 `app.py` reads it too, and the prototype's `run_etl.py` and `vehicle_dwh` database are retired.
 
 ## 10. Naming conventions
 
@@ -196,11 +196,9 @@ These become the quality tests in roadmap step 5.
 
 ## 13. Data catalog (gold)
 
-Columns marked ★ in `dim_vehicle` start a new version when they change.
-
 ### `dim_date`
 
-One row per day from 2008-01-01 to 2030-12-31, plus `-1`.
+One row per day from 2008-01-01 to 2035-12-31 (five-year covers bought in 2026 end in 2031), plus `-1`.
 
 | Column | Type | Description |
 |---|---|---|
@@ -227,14 +225,14 @@ One row per state or union territory (36), plus `-1`.
 
 ### `dim_location`
 
-One row per camera (1,307), plus `-1`.
+One row per camera that has sent a read (1,307), plus `-1`.
 
 | Column | Type | Description |
 |---|---|---|
 | `location_key` | INT | Surrogate key |
 | `camera_id` | VARCHAR(20) | `NHAI-0139` (toll plaza) or `ITMS-DEL-001` (city junction) |
 | `camera_type` | VARCHAR(12) | `TOLL_ANPR` or `CITY_ANPR` |
-| `place_name` | VARCHAR(100) | Toll plaza name, or city junction |
+| `place_name` | VARCHAR(100) | As the camera reports it: toll plaza name, or city junction |
 | `city` | VARCHAR(40) | City of a city camera; NULL for toll plazas |
 | `state_name` | VARCHAR(60) | State the camera is in |
 | `latitude` | DECIMAL(9,6) | |
@@ -260,7 +258,7 @@ One row per version of a vehicle (100,010 after the three drops), plus `-1`.
 |---|---|---|
 | `vehicle_key` | INT | Surrogate key, one per version |
 | `chassis_no` | CHAR(17) | Natural key (VIN) |
-| `plate` | VARCHAR(20) | ★ Canonical plate |
+| `plate` | VARCHAR(20) | Canonical plate |
 | `vehicle_group` | VARCHAR(8) | 2W, CAR, TAXI, LCV, TRUCK, BUS, 3W_P, 3W_G, ERICK or TRACTOR |
 | `vehicle_class` | VARCHAR(40) | Registry class, such as `M-Cycle/Scooter` |
 | `body_type` | VARCHAR(20) | |
@@ -270,14 +268,15 @@ One row per version of a vehicle (100,010 after the three drops), plus `-1`.
 | `colour` | VARCHAR(20) | |
 | `transport_category` | VARCHAR(15) | `Transport` or `Non-Transport` |
 | `registration_date` | DATE | |
-| `rto_code` | VARCHAR(6) | ★ Registering RTO |
+| `rto_code` | VARCHAR(6) | Registering RTO |
 | `rto_name` | VARCHAR(120) | |
-| `state_name` | VARCHAR(60) | ★ Registration state |
-| `owner_type` | VARCHAR(12) | ★ `Individual`, `Company` or `Government` |
-| `owner_name` | VARCHAR(80) | ★ Personal data, used only by the lookup view |
-| `owner_serial` | TINYINT | ★ 1 = first owner |
-| `reg_status` | VARCHAR(12) | ★ `ACTIVE` or `SCRAPPED`, as the registry says |
-| `reg_valid_upto` | DATE | ★ Registration valid until; NULL for transport vehicles |
+| `state_name` | VARCHAR(60) | Registration state |
+| `owner_type` | VARCHAR(12) | `Individual`, `Company` or `Government` |
+| `owner_name` | VARCHAR(80) | Personal data, used only by the lookup view |
+| `owner_serial` | TINYINT | 1 = first owner |
+| `reg_status` | VARCHAR(12) | `ACTIVE` or `SCRAPPED`, as the registry says |
+| `reg_valid_upto` | DATE | Registration valid until; NULL for transport vehicles |
+| `last_updated` | DATE | The registry change that created this version; with `chassis_no` it identifies the version |
 | `valid_from` | DATE | Version start; `1900-01-01` for the first version |
 | `valid_to` | DATE | Version end; `9999-12-31` for the current version |
 | `is_current` | TINYINT | 1 for the current version |
@@ -341,7 +340,7 @@ One row per theft or scrapping case, updated as the case moves. Primary key `cas
 | `recovery_date_key` | INT | `-1` until recovered |
 | `days_to_recovery` | SMALLINT | NULL until recovered |
 | `sightings_after_report` | SMALLINT | Camera reads of the vehicle after the report date (up to recovery, for thefts). For a scrapped vehicle, any read means a cloned plate |
-| `dwh_batch_id` | INT | Batch that last changed the row |
+| `dwh_batch_id` | INT | Batch that last wrote the row (every case is rewritten each night) |
 
 ### `fact_compliance_monthly`
 

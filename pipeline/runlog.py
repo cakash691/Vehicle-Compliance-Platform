@@ -25,6 +25,19 @@ def _execute(sql, params=()):
     return rows, last_id
 
 
+def acquire_run_lock():
+    """Allow one run at a time. MySQL holds a named lock for as long as this connection lives,
+    so a run that crashes never leaves the lock behind. False if another run holds it."""
+    rows, _ = _execute("SELECT GET_LOCK('vehicle_compliance_pipeline', 0)")
+    return rows[0][0] == 1
+
+
+def close_abandoned_batches():
+    """Batches still marked RUNNING belong to runs that died: we hold the lock, so none is alive."""
+    _execute("UPDATE etl.batch SET status = 'FAILED', finished_at = NOW(), "
+             "message = 'Abandoned: the run stopped before it finished' WHERE status = 'RUNNING'")
+
+
 def last_successful_as_of():
     rows, _ = _execute("SELECT MAX(as_of) FROM etl.batch WHERE status = 'SUCCESS'")
     return rows[0][0]

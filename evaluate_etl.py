@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-evaluate_etl.py -- score vehicle_dwh.vehicle_360 against the ground-truth answer key.
+evaluate_etl.py -- score a vehicle_360 table or view against the ground-truth answer key.
 
 Because the v2 data is simulated, the true status of every vehicle is known
 (answer_key/vehicle_truth_2026-11-06.csv). This script compares what your ETL put in
 vehicle_360 with that truth, so you can measure each improvement to the pipeline.
 
 Run it after loading the base + all three daily drops and running your ETL:
-    python3 evaluate_etl.py                       # uses your project's MySQL settings
+    python3 evaluate_etl.py                       # the prototype's vehicle_dwh.vehicle_360
+    python3 evaluate_etl.py --database gold       # the warehouse's gold.vehicle_360 view
     python3 evaluate_etl.py --password secret --user root
 
 Status matching is by keyword, so it keeps working if you rename your status strings:
@@ -21,6 +22,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--host", default="127.0.0.1")
 ap.add_argument("--user", default="iia_app")
 ap.add_argument("--password", default="iia_app_pw")
+ap.add_argument("--database", default="vehicle_dwh", help="vehicle_dwh (prototype) or gold (warehouse)")
 ap.add_argument("--truth", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "answer_key", "vehicle_truth_2026-11-06.csv"))
 args = ap.parse_args()
 
@@ -36,7 +38,7 @@ def etl_bucket(status):
 TRUTH_BUCKET = {"OK": "CLEAR", "EXPIRED": "UNINSURED", "NO_POLICY_IN_FEED": "UNINSURED", "STOLEN": "STOLEN/SCRAPPED", "SHREDDED": "STOLEN/SCRAPPED"}
 truth = {r["canonical_plate"]: r for r in csv.DictReader(open(args.truth, encoding="utf-8"))}
 
-conn = mysql.connector.connect(host=args.host, user=args.user, password=args.password, database="vehicle_dwh")
+conn = mysql.connector.connect(host=args.host, user=args.user, password=args.password, database=args.database)
 cur = conn.cursor()
 cur.execute("SELECT plate_canonical, status FROM vehicle_360")
 rows = cur.fetchall()

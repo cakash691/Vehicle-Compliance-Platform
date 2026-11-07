@@ -17,6 +17,7 @@ EXPECTED = {
     "vehicle_dwh": "vehicle_360",       # prototype, until gold.vehicle_360 exists
     "bronze": "capture_log",
     "silver": "capture_log",
+    "gold": "fact_sighting",
     "etl": "batch",
 }
 
