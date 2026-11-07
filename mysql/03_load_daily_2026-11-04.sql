@@ -1,6 +1,6 @@
 -- 03_load_daily_2026-11-04.sql -- one nightly batch. New rows are appended (IGNORE = safe to re-run);
 -- registrations and theft cases may be UPDATES of existing rows, so they use REPLACE (upsert by primary key).
--- Run from the realistic_data_v2 folder (file paths are relative to where you start mysql):
+-- Run from the project folder (file paths are relative to where you start mysql):
 --   mysql --local-infile=1 -h 127.0.0.1 -u iia_app -piia_app_pw < mysql/03_load_daily_2026-11-04.sql
 -- Needs local_infile enabled on the server once:  mysql -u root -p -e "SET GLOBAL local_infile = 1;"
 

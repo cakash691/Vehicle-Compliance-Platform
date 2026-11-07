@@ -1,12 +1,12 @@
 # Data model
 
-Status, 7 Nov 2026: bronze, silver, gold, the quality checks, the run log and the nightly schedule are built. The marts and the dashboard come next. Until the choices in section 12 are settled, the defaults described there apply.
+Status: bronze, silver, gold, the quality checks, the run log and the nightly job are built. Summary views (marts) and a dashboard are future work. Until the choices in section 12 are settled, the defaults described there apply.
 
-This document fixes the design before any warehouse SQL is written: the questions the warehouse must answer, what one row means in each table, how keys and history work, the cleaning rules, the naming conventions, and a column-level catalog of the gold layer.
+This document records the design: the questions the warehouse must answer, what one row means in each table, how keys and history work, the cleaning rules, the naming conventions, and a column-level catalog of the gold layer.
 
 ## 1. Questions the warehouse answers
 
-| # | Question | Answered from | Planned view |
+| # | Question | Answered from | Summary view (future work) |
 |---|---|---|---|
 | Q1 | What share of registered vehicles in each state has no valid third-party cover, month by month? | `fact_compliance_monthly` | `mart_uninsured_by_state_month` |
 | Q2 | How does that compare with the vehicles actually seen on the road? | `fact_compliance_monthly` | `mart_uninsured_by_state_month` |
@@ -15,7 +15,7 @@ This document fixes the design before any warehouse SQL is written: the question
 | Q5 | How many vehicles are stolen per state each year, how many are recovered, and how fast? | `fact_theft_case` | `mart_theft_recovery` |
 | Q6 | Which insurers issue the most policies by state, vehicle type and year, with merged companies combined? | `fact_policy` | `mart_insurer_share` |
 
-The lookup app moves onto the warehouse through one more view, `vehicle_360` (section 9).
+Gold also has one ready-made view, `vehicle_360` (section 9).
 
 ## 2. Layers
 
@@ -36,7 +36,7 @@ Bronze copies the rows whose watermark column is later than the stored watermark
 | `rto_registration.registrations` | `last_updated` (date) | Runs only copy finished days, so a date is precise enough: by the time a day is copied, all its changes are in |
 | `insurance.policies` | `issued_at` | |
 | `theft_records.theft_shredding` | `updated_at` (date) | As for registrations |
-| `roadcapture.capture_log` | `ingested_at` | Not `capture_time`: 1% of reads arrive more than 24 hours late, and a `capture_time` watermark (the prototype's) skips them |
+| `roadcapture.capture_log` | `ingested_at` | Not `capture_time`: 1% of reads arrive more than 24 hours late, and a `capture_time` watermark would skip them |
 
 ## 3. Star schema
 
@@ -92,25 +92,25 @@ Which dimensions each fact uses, and in what role:
   - The first version starts on `1900-01-01`, not on the load date, so events from before the warehouse existed (a policy bought days before registration, a sighting last year) still find a version. Its registry status counts only from its `last_updated` date, so a vehicle already scrapped at the first load is not treated as scrapped for all of its past.
   - History starts with the warehouse. The registry keeps only the current row, so changes made before the first load cannot be recovered. From then on, bronze keeps every changed row and `dim_vehicle` keeps every version. The three daily drops contain 10 such changes, all ownership transfers.
 - **Point in time.** Each fact points at the vehicle version that was valid on the fact's own date: the capture date, the issue date, the report date, or the snapshot's `status_as_of`.
-- **Indexes.** Each fact is indexed on its dimension keys; `dim_vehicle` on `(chassis_no, valid_from)` and `(plate, valid_from)`.
+- **Indexes.** Each fact is indexed on its dimension keys; `dim_vehicle` on `(chassis_no, valid_from)` and on `plate`.
 - **No enforced foreign keys** in gold. Loads stay simple and fast, and the quality checks (section 11) make sure every key resolves.
 
 ## 6. Cleaning rules (silver)
 
-The prototype matched policies by plate and kept only the last policy per plate, so `NEW` filings, the insurers' different plate formats and `Standalone OD` policies all produced false flags (6,447 insured vehicles flagged). Rules 1 to 3 remove those causes.
+An earlier prototype matched policies by plate and kept only the last policy per plate, so `NEW` filings, the insurers' different plate formats and `Standalone OD` policies flagged 6,447 insured vehicles as uninsured. Rules 1 to 3 remove those causes.
 
 1. **One plate format.** Uppercase the plate and drop spaces and hyphens, then parse it as one of three patterns:
    - standard: state code, RTO number padded to two digits, one or two series letters, four digits. `MH-4-AB-1234` becomes `MH04AB1234`
    - Delhi: RTO number without a leading zero, then the class letter and series. `DL-06-SCP-2349` becomes `DL6SCP2349`
    - BH series: `22 BH 1234 AA` becomes `22BH1234AA`
 
-   Anything else is `INVALID_FORMAT`. On this data the rule turns every registry plate into the answer key's plate, and 99.6% of insurer plates into the registry plate of the same chassis. The rest are typos.
+   Anything else is `INVALID_FORMAT`. On this data the rule parses every registry plate, and turns 99.6% of insurer plates into the registry plate of the same chassis; the rest are typos.
 2. **Vehicles are identified by chassis number, not plate.** Every policy carries the chassis, including the 13,584 filed under `NEW`. About 10% of theft cases have no chassis, so those fall back to the plate. Camera reads have only a plate, so they are matched through the registry.
 3. **Third-party cover.** Every policy type includes third-party (TP) cover except `Standalone OD`. The TP cover runs from `valid_from` to `valid_to`. For bundled policies, `valid_to` is the end of the TP term and `od_valid_to` the end of the one-year own-damage cover.
 4. **Insurer names** map through `ref/insurers.csv`. `Bharti AXA General Insurance` maps to `ICICI Lombard` (merged 8 Sep 2021), `Reliance General` to `IndusInd General Insurance` (renamed 22 Sep 2025), and New India, United India, Oriental and National are public sector.
 5. **Camera reads.** A second read of the same plate by the same camera within 5 seconds is an adjacent-lane duplicate: silver flags it and gold leaves it out. Each read gets a `read_status`: `UNREADABLE` (empty plate), `INVALID_FORMAT`, `NOT_IN_REGISTRY` (valid format but unknown: a misread or a fake plate) or `MATCHED`. Today 96.9% of reads match.
 6. **Scrapping.** A vehicle counts as scrapped from the date of its certificate from a registered vehicle scrapping facility (RVSF), which the feed records as a `SHREDDED` case. Without a certificate, it counts as scrapped from the day the registry recorded it, which is later, or never.
-7. **Theft.** A vehicle counts as stolen from the report date up to, but not including, the recovery date. Recovered vehicles are no longer flagged; the prototype flagged 80 of them.
+7. **Theft.** A vehicle counts as stolen from the report date up to, but not including, the recovery date. Recovered vehicles are no longer flagged.
 8. **Status on a date.** One rule for every fact; the first match wins:
 
    | Status | When |
@@ -163,15 +163,15 @@ The nightly job, `scripts/run_nightly.sh`, runs these steps at 00:05 with `as_of
 
 ## 9. Views
 
-- The `mart_*` views from section 1, for the dashboard and EDA.
-- `vehicle_360` (built with gold): one row per vehicle seen on camera, with its latest sighting, latest third-party policy and status on the latest `as_of`. It keeps the prototype table's columns and status wording, so `python3 evaluate_etl.py --database gold` scores the warehouse. In step 7 `app.py` reads it too, and the prototype's `run_etl.py` and `vehicle_dwh` database are retired.
+- `vehicle_360`: one row per vehicle seen on camera, answering "what do we know about this plate?" in one query: the vehicle and its owner, its latest policy with third-party cover, where and when it was last seen, and its status on the latest `as_of` (rule 8).
+- Future work: the `mart_*` views from section 1, and a dashboard on top of them.
 
 ## 10. Naming conventions
 
 - MySQL calls a schema a database. The layers are the databases `bronze`, `silver`, `gold` and `etl`; the source databases keep their names. `mysql/00_setup_mysql.sql` gets a `CREATE DATABASE` and a `GRANT` line for each.
 - Names are lowercase English `snake_case` and never MySQL reserved words. `reads` already caused one bug here; `rank`, `groups`, `last_value` and `year_month` are others to avoid.
 - Bronze and silver tables keep the source table's name. Reference tables are `ref_<file name>`.
-- Gold tables are `dim_<entity>` and `fact_<process>`, in the singular. Views are `mart_<topic>`.
+- Gold tables are `dim_<entity>` and `fact_<process>`, in the singular. Summary views are `mart_<topic>`.
 - Keys: `<dimension>_key` for surrogate keys, `<role>_date_key` for dates (`report_date_key`), and `-1` for unknown.
 - Flags start with `is_` or `has_` and hold 0 or 1. Counts and durations name their unit: `cover_days`, `vehicle_age_years`, `sightings_in_month`.
 - Technical columns start with `dwh_`: `dwh_batch_id`, `dwh_loaded_at`.
@@ -210,7 +210,7 @@ If a silver check fails, fix the cause, usually a parsing rule or a mapping in `
 - **Snapshot start.** `fact_compliance_monthly` starts in January 2023, when the insurer feed starts. Earlier months would show every vehicle as `NO_POLICY`.
 - **Month status date.** Each month's status is taken on its last day. The alternative, "uninsured on any day of the month", would count more vehicles.
 - **Repairing misreads.** Reads whose plate matches no vehicle (2.8%) could be retried with one character swapped (`O` and `0`, `B` and `8`, and so on), keeping a hit only when it is unique. It is left out to keep silver simple.
-- **Owner names.** They stay in `dim_vehicle` only for the lookup view. Drop them if the warehouse should hold no personal data.
+- **Owner names.** They stay in `dim_vehicle` only for the `vehicle_360` view. Drop them if the warehouse should hold no personal data.
 
 ## 13. Data catalog (gold)
 
@@ -290,7 +290,7 @@ One row per version of a vehicle (100,010 after the three drops), plus `-1`.
 | `rto_name` | VARCHAR(120) | |
 | `state_name` | VARCHAR(60) | Registration state |
 | `owner_type` | VARCHAR(12) | `Individual`, `Company` or `Government` |
-| `owner_name` | VARCHAR(80) | Personal data, used only by the lookup view |
+| `owner_name` | VARCHAR(80) | Personal data, used only by the `vehicle_360` view |
 | `owner_serial` | TINYINT | 1 = first owner |
 | `reg_status` | VARCHAR(12) | `ACTIVE` or `SCRAPPED`, as the registry says |
 | `reg_valid_upto` | DATE | Registration valid until; NULL for transport vehicles |

@@ -1,5 +1,5 @@
 -- 02_load_base.sql -- bulk-load the base snapshot (everything ingested up to 2026-11-03 23:59:59)
--- Run from the realistic_data_v2 folder (file paths are relative to where you start mysql):
+-- Run from the project folder (file paths are relative to where you start mysql):
 --   mysql --local-infile=1 -h 127.0.0.1 -u iia_app -piia_app_pw < mysql/02_load_base.sql
 -- Needs local_infile enabled on the server once:  mysql -u root -p -e "SET GLOBAL local_infile = 1;"
 

@@ -1,7 +1,7 @@
 -- =====================================================================================
 -- 04_sanity_checks.sql -- quick checks that the load worked and a first look at the data.
 --   mysql -h 127.0.0.1 -u iia_app -piia_app_pw -t < mysql/04_sanity_checks.sql
--- (These only inspect the sources. The integration / decision queries are the next step.)
+-- (These only inspect the sources; run_pipeline.py does the integration.)
 -- =====================================================================================
 
 -- 1. Row counts and time coverage

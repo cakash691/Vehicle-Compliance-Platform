@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-generate_realistic_data.py -- v2 dataset for Identification-of-Uninsured-Vehicles (CSE656).
+generate_realistic_data.py -- the source data for the Vehicle Compliance Platform.
 
 Writes CSVs for the four independent source systems:
   sources/registrations.csv     RTO / VAHAN-style registry
@@ -25,11 +25,11 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ap = argparse.ArgumentParser(description="Generate realistic v2 source CSVs")
+ap = argparse.ArgumentParser(description="Generate the CSV files of the four source systems")
 ap.add_argument("--vehicles", type=int, default=100_000, help="registry size (default 100000)")
 ap.add_argument("--seed", type=int, default=42)
 ap.add_argument("--out", default=HERE, help="output folder (default: this script's folder)")
-ap.add_argument("--report-only", action="store_true", help="only print/write the calibration report")
+ap.add_argument("--report-only", action="store_true", help="only print the calibration report")
 args = ap.parse_args()
 R = random.Random(args.seed)
 
@@ -1240,28 +1240,6 @@ for D in DROP_DAYS:
     write(os.path.join(base, "policies.csv"), POL_COLS, POL_DAILY[D])
     write(os.path.join(base, "capture_log.csv"), CAP_COLS, CAP_DAILY[D])
     write(os.path.join(base, "theft_shredding.csv"), THF_COLS, THF_DAILY[D])
-# answer key (ground truth) -- for EVALUATING an ETL, never as an input to it ----------------
-def expected_status(v):
-    th = v["theft"]
-    if th and th["date"] <= END and (th["rec"] is None or th["rec"] > END): return "STOLEN"
-    if v["scrap"] and v["scrap"] <= END: return "SHREDDED"
-    if has_tp(v["id"], END, END_DT): return "OK"
-    in_feed = any(e >= POLICY_FEED_FROM and iss <= END_DT for s_, e, iss in TP_BY_V.get(v["id"], ()))
-    return "EXPIRED" if in_feed else "NO_POLICY_IN_FEED"
-seen = Counter(r["_v"]["id"] for r in CAP_ROWS if r["_v"] is not None)
-VT_COLS = ["reg_id", "canonical_plate", "chassis_no", "vehicle_class", "state_name", "expected_status", "latest_tp_valid_to",
-           "times_on_camera"]
-vt_rows = []
-for v in V_sorted:
-    tp_ends = [e for s_, e, iss in TP_BY_V.get(v["id"], ()) if iss <= END_DT]
-    vt_rows.append({"reg_id": v["reg_id"], "canonical_plate": v["plate"]["c"], "chassis_no": v["vin"], "vehicle_class": VAHAN_CLASS[v["cls"]],
-                    "state_name": STATES[v["state"]]["state_name"], "expected_status": expected_status(v),
-                    "latest_tp_valid_to": iso(max(tp_ends)) if tp_ends else "", "times_on_camera": seen.get(v["id"], 0)})
-write(os.path.join(out, "answer_key", "vehicle_truth_2026-11-06.csv"), VT_COLS, vt_rows)
-CT_COLS = ["capture_id", "true_reg_id", "true_plate", "read_error", "scenario"]
-write(os.path.join(out, "answer_key", "capture_truth.csv"), CT_COLS,
-      ({"capture_id": r["capture_id"], "true_reg_id": r["_v"]["reg_id"] if r["_v"] is not None else "", "true_plate": r["_truth"],
-        "read_error": r["_err"] or "none", "scenario": r["_tag"] or "normal"} for r in CAP_ROWS))
 with open(os.path.join(out, "calibration_report.md"), "w", encoding="utf-8") as f:
     f.write(report + "\n")
 print("\nBase load (as of", BASE_CUTOFF, "):", ", ".join(f"{k} {n:,}" for k, n in counts.items()))

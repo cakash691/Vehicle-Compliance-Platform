@@ -1,11 +1,12 @@
 # Where every number comes from
 
-The v2 records are simulated, because real per-vehicle registration and insurance records
+The records are simulated, because real per-vehicle registration and insurance records
 are not public in India. What makes them defensible is that each distribution is pinned to
 a published figure, and the reference data (RTO codes, NHAI toll plazas) is real. This file
 lists both, followed by the parts that are assumptions.
 
-`calibration_report.md` shows how close the generated data lands to each figure.
+Running the generator also writes `calibration_report.md`, which shows how close the generated
+data lands to each figure.
 
 ## 1. Calibration anchors (official or widely reported figures)
 

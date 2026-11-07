@@ -1,7 +1,7 @@
 # Generated data -- recreate any time with: python3 generate_realistic_data.py
 /sources/
 /daily/
-/answer_key/
+/calibration_report.md
 
 # Python
 venv/

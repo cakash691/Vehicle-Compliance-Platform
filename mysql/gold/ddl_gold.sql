@@ -178,26 +178,22 @@ CREATE TABLE IF NOT EXISTS gold.fact_compliance_monthly (
 
 -- ---------- views ----------
 
--- One row per vehicle seen on camera: its latest sighting, latest TP policy and status on the
--- warehouse's latest as_of date. Same columns and status wording as the prototype's table, so
--- app.py and evaluate_etl.py work with it (python3 evaluate_etl.py --database gold).
+-- One row per vehicle seen on camera: its latest sighting, its latest policy with third-party
+-- cover, and its status on the warehouse's latest as_of date
+-- (INSURED, EXPIRED, NO_POLICY, STOLEN or SCRAPPED).
 CREATE OR REPLACE VIEW gold.vehicle_360 AS
-SELECT v.plate             AS plate_canonical,
+SELECT v.plate,
        v.owner_name,
        v.make_model,
+       v.vehicle_group,
        v.registration_date,
+       v.state_name        AS registration_state,
        p.insurer_name      AS insurer,
        p.policy_valid_to,
-       CASE m.status WHEN 'STOLEN' THEN 'STOLEN' WHEN 'SCRAPPED' THEN 'SHREDDED' ELSE '-' END AS theft_flag,
        s.place_name        AS last_seen_location,
        s.capture_time      AS last_seen_time,
-       CASE m.status
-            WHEN 'INSURED'   THEN 'OK - INSURED & CLEAR'
-            WHEN 'EXPIRED'   THEN 'INSURANCE EXPIRED -> FLAG'
-            WHEN 'NO_POLICY' THEN 'NO INSURANCE ON FILE -> FLAG'
-            WHEN 'STOLEN'    THEN 'STOLEN/SHREDDED -> FLAG (STOLEN)'
-            WHEN 'SCRAPPED'  THEN 'STOLEN/SHREDDED -> FLAG (SCRAPPED)'
-       END                 AS status
+       m.status,
+       m.status_as_of
 FROM (
     SELECT dv.chassis_no, f.capture_time, l.place_name,
            ROW_NUMBER() OVER (PARTITION BY dv.chassis_no ORDER BY f.capture_time DESC, f.capture_id DESC) AS rn

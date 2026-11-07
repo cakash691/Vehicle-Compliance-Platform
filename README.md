@@ -13,7 +13,7 @@ The warehouse is built to answer questions such as:
 - How many two-wheelers lapse after their first policy?
 - Where do stolen vehicles turn up?
 
-On 4 August 2026, the Supreme Court directed that ANPR cameras be integrated with the IIB and VAHAN databases so that uninsured vehicles receive automatic e-challans ([report](https://www.thelawadvice.com/news/sc-orders-automatic-e-challans-for-uninsured-vehicles-directs-4-year-insurance-for-new-cars-6-years-for-two-wheelers)). That is the same integration this warehouse performs, aimed at analysis rather than enforcement. An earlier prototype lives in [Identification-of-Uninsured-Vehicles](https://github.com/cakash691/Identification-of-Uninsured-Vehicles).
+On 4 August 2026, the Supreme Court directed that ANPR cameras be integrated with the IIB and VAHAN databases so that uninsured vehicles receive automatic e-challans ([report](https://www.thelawadvice.com/news/sc-orders-automatic-e-challans-for-uninsured-vehicles-directs-4-year-insurance-for-new-cars-6-years-for-two-wheelers)). That is the same integration this warehouse performs, aimed at analysis rather than enforcement. The project grew out of an earlier one, [Identification-of-Uninsured-Vehicles](https://github.com/cakash691/Identification-of-Uninsured-Vehicles).
 
 ## Architecture
 
@@ -26,43 +26,48 @@ flowchart LR
         C["ANPR camera reads"]
         T["Theft and scrapping"]
     end
-    B["Bronze<br/>raw copies per batch"]
-    S["Silver<br/>cleaned and conformed"]
-    GD[("Gold<br/>star schema with history")]
-    DB["Dashboard"]
-    M["SQL marts"]
-    V["vehicle_360 view<br/>+ lookup app"]
+    subgraph DWH["Warehouse, loaded every night"]
+        B["Bronze<br/>raw copies per batch"]
+        S["Silver<br/>cleaned and conformed"]
+        GD[("Gold<br/>star schema with history")]
+    end
+    Q["Analysis in SQL"]
+    V["vehicle_360 view"]
     G --> R & P & C & T
     R & P & C & T --> B
     B --> S --> GD
-    GD --> DB & M & V
-    classDef planned stroke-dasharray: 5 5
-    class DB,M planned
+    GD --> Q & V
 ```
 
-The four sources have no foreign keys between them; the warehouse is the only place they meet. It is organised in three layers:
+The four sources have no foreign keys between them; the warehouse is the only place they meet. Each source gets a daily drop of new and changed records, and every night a pipeline extracts those changes, cleans them and loads them through three layers:
 
 - **Bronze** keeps raw copies of every new or changed source row, tagged with a batch id.
 - **Silver** cleans and conforms them: it parses plate numbers, gives each vehicle a single identity, works out insurance coverage periods and current theft status, and flags bad camera reads.
-- **Gold** is a star schema of facts and dimensions that keeps history, so trends can be analysed.
+- **Gold** is a star schema of facts and dimensions that keeps history, so trends can be analysed. It is the source of truth for historical analysis.
 
-All three layers are built; dashed boxes are planned. The design is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md). The prototype ETL (`run_etl.py`) still builds its own `vehicle_360` straight from the sources, so the two can be compared; the lookup app moves to `gold.vehicle_360` in step 7.
+Quality checks run after silver and after gold, and every run is logged. The design is in [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
-## Status
+## What's built
 
-| Component | Status |
-|---|---|
-| Four source databases, loaded with calibrated data | Done |
-| Bulk load and three nightly drops (`mysql/`) | Done |
-| Accuracy scoring against ground truth (`evaluate_etl.py`) | Done |
-| Prototype ETL (`run_etl.py`) → `vehicle_360` + Streamlit lookup app | Done; replaced by `gold.vehicle_360` (the app moves over in step 7) |
-| Warehouse design (`docs/DATA_MODEL.md`) | Done |
-| Bronze layer: raw copies per batch, with a run log and watermarks (`run_pipeline.py`) | Done |
-| Silver layer: cleaned and conformed, rebuilt from bronze on every run | Done |
-| Gold layer: star schema with history, and the `vehicle_360` view | Done |
-| Data quality checks after silver and after gold (`pipeline/checks.py`) | Done |
-| Nightly schedule (`scripts/`): launchd on a Mac, cron on Linux | Done |
-| SQL marts and analytics dashboard | Next |
+1. **Design.** The grain of each fact, the star schema, the cleaning rules, naming conventions and a data catalog: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
+2. **Bronze.** Incremental extraction from the four sources using their change-tracking columns (`ingested_at`, `issued_at`, `last_updated`, `updated_at`), with a watermark per source and a log of each batch.
+3. **Silver.** Rebuilt from bronze on every run:
+   - identify each vehicle by chassis number
+   - parse every plate into one format
+   - compute third-party coverage periods (own-damage-only policies don't count)
+   - keep the current theft status
+   - map insurer names (Reliance General → IndusInd)
+   - deduplicate camera reads and flag misreads
+4. **Gold.** The star schema, loaded incrementally:
+   - `fact_sighting`, recording the status at the moment of each camera read
+   - `fact_policy`
+   - `fact_theft_case`
+   - `fact_compliance_monthly`, a monthly compliance snapshot of every vehicle
+   - date, state, location, insurer and vehicle dimensions; the vehicle dimension keeps every registry change (SCD type 2)
+5. **Quality checks.** 23 checks after silver and after gold, recorded in the run log; a failed check after silver stops the night before gold changes ([section 11](docs/DATA_MODEL.md#11-quality-checks)).
+6. **Nightly job.** One command, `scripts/run_nightly.sh`, run at 00:05 by launchd on a Mac (cron on Linux).
+
+Future work: summary views (marts) for the common questions, and a dashboard on top of them.
 
 ## Quick start (macOS)
 
@@ -72,7 +77,7 @@ M="mysql --local-infile=1 -h 127.0.0.1 -u iia_app -piia_app_pw"   # used by ever
 # one-time setup
 brew install mysql && brew services start mysql
 python3 -m venv venv && source venv/bin/activate
-pip install mysql-connector-python pandas streamlit
+pip install mysql-connector-python
 mysql -u root -p < mysql/00_setup_mysql.sql            # the iia_app user and all databases
 mysql -u root -p -e "SET PERSIST local_infile = 1;"   # allow LOAD DATA LOCAL
 $M < mysql/etl/ddl_etl.sql                             # run log and watermarks
@@ -80,31 +85,26 @@ $M < mysql/bronze/ddl_bronze.sql                       # bronze tables
 $M < mysql/silver/ddl_silver.sql                       # silver tables
 $M < mysql/gold/ddl_gold.sql                           # gold tables and the vehicle_360 view
 
-# 1. generate the data (~35 s; writes sources/, daily/, answer_key/)
+# 1. generate the data (~30 s; writes sources/ and daily/)
 python3 generate_realistic_data.py
 
 # 2. load the four source databases, up to the night of 3 Nov 2026
 $M < mysql/01_create_source_tables.sql
 $M < mysql/02_load_base.sql
 
-# 3. run that night: the warehouse pipeline, then the prototype ETL
-python3 run_pipeline.py --as-of 2026-11-03             # bronze, silver and gold (~3 min the first time)
-python3 run_etl.py                                     # prototype: builds vehicle_360
+# 3. run the pipeline for that night: bronze, silver and gold (~3 min the first time)
+python3 run_pipeline.py --as-of 2026-11-03
 
-# 4. the next three nights: load the day's drop, then run both again
+# 4. the next three nights: load the day's drop, then run the pipeline again
 for d in 04 05 06; do
   $M < mysql/03_load_daily_2026-11-$d.sql
-  python3 run_pipeline.py --as-of 2026-11-$d && python3 run_etl.py
+  python3 run_pipeline.py --as-of 2026-11-$d || break
 done
-
-# 5. explore, and score both against the ground truth
-python3 check_connections.py
-streamlit run app.py                                   # Ctrl+C to stop
-python3 evaluate_etl.py                                # the prototype
-python3 evaluate_etl.py --database gold                # the warehouse
 ```
 
-Each pipeline run copies the night's changes into bronze, rebuilds silver from bronze, and adds what is new to gold. The first run takes about 3 minutes because it fills 46 months of compliance history; later nights take under a minute. Every step is logged in `etl.batch` and `etl.step_log`. If a run fails, fix the cause and rerun the same command. Only one run can happen at a time.
+Each run copies the night's changes into bronze, rebuilds silver from bronze, and adds what is new to gold. The first run takes about 3 minutes because it fills 47 months of compliance history; later nights take under a minute. Every step is logged in `etl.batch` and `etl.step_log`. If a run fails, fix the cause and rerun the same command. Only one run can happen at a time.
+
+A run ends by printing the share of vehicles without valid third-party cover. On 6 Nov 2026 it is 49.2% of registered vehicles and 29.2% of those seen on camera in the previous 90 days, the same figures `calibration_report.md` measures on the generated data.
 
 23 quality checks run after silver and after gold. If one fails after silver, the night stops before gold changes; the usual fix is a parsing rule or a mapping in `ref/`, then the same command again. To see a night's checks:
 
@@ -113,11 +113,41 @@ $M -e "SELECT step, status, rows_affected, message FROM etl.step_log
         WHERE batch_id = (SELECT MAX(batch_id) FROM etl.batch) AND step LIKE 'check:%'"
 ```
 
-`01_create_source_tables.sql` drops and recreates the four source tables and the prototype's `vehicle_360`. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties the three layers and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded data.
+`01_create_source_tables.sql` drops and recreates the four source tables. To rerun the whole sequence from scratch, also run `$M < mysql/etl/reset_warehouse.sql`, which empties the three layers and the run log; the pipeline refuses to run on recreated sources until you do. `mysql/04_sanity_checks.sql` gives a first look at the loaded sources.
 
-## Nightly schedule
+## Using the warehouse
 
-`scripts/run_nightly.sh` is the one command a scheduler calls. It runs the pipeline for yesterday and appends to `logs/pipeline_YYYY-MM-DD.log` (kept for 30 days); on a Mac, a failed night also shows a notification. To schedule it on a Mac:
+Gold is plain MySQL, so any SQL client can query it. Three examples, run with `$M` after the quick start:
+
+```sql
+-- Share of registered vehicles without valid third-party cover, month by month
+SELECT d.month_label, ROUND(100 * AVG(m.is_uninsured), 1) AS pct_uninsured
+FROM gold.fact_compliance_monthly m
+JOIN gold.dim_date d ON d.date_key = m.month_key
+WHERE m.status NOT IN ('STOLEN', 'SCRAPPED')
+GROUP BY d.month_label
+ORDER BY d.month_label;
+
+-- States where cameras saw the most uninsured vehicles in October 2026
+SELECT s.state_name, SUM(f.is_uninsured) AS uninsured_sightings,
+       ROUND(100 * AVG(f.is_uninsured), 1) AS pct_of_sightings
+FROM gold.fact_sighting f
+JOIN gold.dim_state s ON s.state_key = f.state_key
+JOIN gold.dim_date d ON d.date_key = f.date_key
+WHERE f.read_status = 'MATCHED' AND d.month_label = '2026-10'
+GROUP BY s.state_name
+ORDER BY uninsured_sightings DESC
+LIMIT 5;
+
+-- Everything known about one plate: a two-wheeler reported stolen on 5 Nov and seen on camera on 6 Nov
+SELECT * FROM gold.vehicle_360 WHERE plate = 'DL13SET1336';
+```
+
+Section 1 of [docs/DATA_MODEL.md](docs/DATA_MODEL.md) lists the questions the star schema is built for, and the fact table that answers each.
+
+## Nightly schedule (optional)
+
+The quick start runs each night by hand. `scripts/run_nightly.sh` is the one command a scheduler calls instead: it runs the pipeline for yesterday and appends to `logs/pipeline_YYYY-MM-DD.log` (kept for 30 days); on a Mac, a failed night also shows a notification. To schedule it on a Mac:
 
 ```bash
 bash scripts/schedule_nightly.sh                                    # every night at 00:05
@@ -127,11 +157,11 @@ bash scripts/schedule_nightly.sh remove                             # stop the s
 
 It uses launchd rather than cron because a MacBook is usually asleep at midnight: cron skips a run it misses, while launchd runs it as soon as the Mac wakes. macOS does not let scheduled jobs read `~/Desktop`, `~/Documents` or `~/Downloads`, so keep the repo somewhere else, such as `~/Projects`; the script checks this. On a Linux server, the same job is one cron line: `5 0 * * * /bin/bash /path/to/repo/scripts/run_nightly.sh`.
 
-A missed night needs no special handling, because the next run copies everything since the watermarks. To watch the schedule pick up new data, load the next daily drop during the day; the 00:05 run copies it.
+A missed night needs no special handling, because the next run copies everything since the watermarks.
 
 ## The data
 
-Real per-vehicle registration and insurance records are not public in India, so the records are simulated. Every distribution is calibrated to a published figure, though, and the reference data is real: 701 NHAI toll plazas and the RTO codes of every state and union territory. [DATA_SOURCES.md](DATA_SOURCES.md) gives the source for every number and lists the assumptions; [calibration_report.md](calibration_report.md) measures the fit.
+Real per-vehicle registration and insurance records are not public in India, so the records are simulated. Every distribution is calibrated to a published figure, though, and the reference data is real: 701 NHAI toll plazas and the RTO codes of every state and union territory. [DATA_SOURCES.md](DATA_SOURCES.md) gives the source for every number and lists the assumptions; running the generator also writes `calibration_report.md`, which measures the fit.
 
 | Measure | This dataset | Official figure |
 |---|---:|---|
@@ -159,66 +189,25 @@ The data deliberately contains the problems that make integration hard:
 - camera reads that arrive days late
 - an insurer renamed partway through the feed
 
-The generator is seeded, so `python3 generate_realistic_data.py` recreates byte-identical files in about 35 seconds. Use `--vehicles` to change the size.
-
-## Measuring accuracy
-
-Because the data is simulated, the true status of every vehicle is known (`answer_key/`). `evaluate_etl.py` scores a `vehicle_360` against it: the prototype's, or the warehouse's with `--database gold`. Both measured by running the quick start above:
-
-| Metric | Prototype ETL | Warehouse (gold) |
-|---|---|---|
-| Status accuracy on real plates | 86.7% | 100% |
-| Insured vehicles wrongly flagged | 19.6% (6,447 of 32,859) | 0 |
-| Uninsured vehicles missed | 0 | 0 |
-| Stolen or scrapped vehicles caught | 67 of 67, plus 80 false alarms on recovered cases | 67 of 67, no false alarms |
-| `vehicle_360` rows that are not real plates | 12,260 of 61,061 | 0 of 48,801 |
-
-The warehouse scores 100% because its rules follow the same definitions the simulation uses for the truth. What the comparison shows is that matching vehicles by chassis number, putting every plate into one format and counting only third-party cover remove the prototype's errors; real-world data would not score this cleanly. The warehouse also reproduces the calibration figures: on 6 Nov 2026, 49.2% of registered vehicles and 29.2% of those seen on camera in the previous 90 days had no valid third-party cover.
-
-## Roadmap
-
-1. **Design** (done). Define the grain of each fact, the star schema, naming conventions and a data catalog: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
-2. **Bronze** (done). Extract incrementally from the four sources using their change-tracking columns (`ingested_at`, `issued_at`, `last_updated`, `updated_at`), and log each batch.
-3. **Silver** (done). Clean and conform the sources, removing the causes of the prototype's 6,447 wrongful flags:
-   - identify each vehicle by chassis number
-   - parse every plate into one format
-   - compute third-party coverage periods (own-damage-only policies don't count)
-   - keep the current theft status
-   - map insurer names (Reliance General → IndusInd)
-   - deduplicate camera reads and flag misreads
-4. **Gold** (done). Build the star schema:
-   - `fact_sighting`, recording the status at the moment of each camera read
-   - `fact_policy`
-   - `fact_theft_case`
-   - a monthly compliance snapshot
-   - date, state, vehicle (with history), location and insurer dimensions, with stable surrogate keys
-5. **Quality checks** (done) that stop a bad batch before it reaches gold, recorded in the run log: [docs/DATA_MODEL.md, section 11](docs/DATA_MODEL.md#11-quality-checks).
-6. **Nightly schedule** (done). One command, `scripts/run_nightly.sh`, run at 00:05 by launchd on a Mac (cron on Linux).
-7. **Analytics:** SQL marts and a dashboard, with `vehicle_360` rebuilt as a gold view for the lookup app.
+The generator is seeded, so `python3 generate_realistic_data.py` recreates byte-identical files in about 30 seconds. Use `--vehicles` to change the size.
 
 ## Repository layout
 
 ```
 ├── generate_realistic_data.py   calibrated data generator (standard library only, seeded)
 ├── ref/                         real reference data, the pipeline's mappings, and the scripts that built them
-├── mysql/                       00 setup · 01 tables · 02 base load · 03 nightly loads · 04 checks
+├── mysql/                       00 setup · 01 tables · 02 base load · 03 nightly loads · 04 sanity checks
 │   ├── etl/                     run log and watermark tables, reset_warehouse.sql
 │   ├── bronze/                  bronze tables
 │   ├── silver/                  silver tables
 │   └── gold/                    gold tables and the vehicle_360 view
 ├── run_pipeline.py              one night of the warehouse pipeline (--as-of YYYY-MM-DD)
-├── scripts/                     the nightly job, and the script that schedules it on a Mac
 ├── pipeline/                    one module per layer, the quality checks, the plate parser, the run log
+├── scripts/                     the nightly job, and the script that schedules it on a Mac
 ├── docs/DATA_MODEL.md           warehouse design: grain, star schema, rules, naming, catalog
-├── run_etl.py                   prototype: extract → standardize → decide → upsert into vehicle_360
-├── app.py                       Streamlit lookup and flagged-vehicle report
 ├── db_config.py                 MySQL connection settings (local, throwaway credentials)
-├── check_connections.py         verifies every database is reachable
-├── evaluate_etl.py              scores a vehicle_360 against the answer key (--database gold for the warehouse)
-├── .streamlit/config.toml       app theme
 ├── DATA_SOURCES.md              provenance and assumptions
-├── calibration_report.md        simulated vs official figures
-└── sources/ daily/ answer_key/  generated locally, not committed (logs/ too)
+└── sources/ daily/              generated locally, not committed (calibration_report.md and logs/ too)
 ```
 
 Author: Akash Chakraborty, M.Tech CSE, IIIT-Delhi

@@ -1,11 +1,10 @@
 -- =====================================================================================
--- 01_create_source_tables.sql  --  v2 schema for the four independent source databases
--- Run once (as iia_app or root) BEFORE loading:
+-- 01_create_source_tables.sql -- the tables of the four independent source databases
+-- Run before loading (as iia_app or root):
 --   mysql -h 127.0.0.1 -u iia_app -piia_app_pw < mysql/01_create_source_tables.sql
--- The first columns of every table are exactly the v1 columns, so run_etl.py and app.py
--- keep working; everything after them is new in v2.
--- WARNING: drops and recreates the four source tables, and resets the warehouse
--- (vehicle_360 + etl_watermark) so that no stale watermark survives -- see README.
+-- WARNING: drops and recreates the four source tables. If the warehouse already holds data,
+-- empty it too (mysql/etl/reset_warehouse.sql) before replaying the nights: run_pipeline.py
+-- refuses to run on recreated sources until you do.
 -- =====================================================================================
 
 -- ---------- on-road ANPR captures (the driving table) ----------
@@ -100,7 +99,3 @@ CREATE TABLE theft_records.theft_shredding (
   KEY idx_plate_number (plate_number),
   KEY idx_chassis_no (chassis_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- ---------- reset the warehouse so the v2 data is loaded from scratch ----------
-DROP TABLE IF EXISTS vehicle_dwh.vehicle_360;
-DROP TABLE IF EXISTS vehicle_dwh.etl_watermark;
